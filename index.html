@@ -9,9 +9,9 @@
 <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css" rel="stylesheet">
 
 <script type="module">
-import { initializeApp } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-app.js";
-import { getAuth, signInWithEmailAndPassword, signOut, onAuthStateChanged, createUserWithEmailAndPassword } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-auth.js";
-import { getFirestore, collection, collectionGroup, doc, getDoc, getDocs, setDoc, addDoc, updateDoc, deleteDoc, onSnapshot, increment, deleteField, query, orderBy, limit, where } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore.js";
+import { initializeApp, deleteApp } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-app.js";
+import { getAuth, signInWithEmailAndPassword, signOut, onAuthStateChanged, createUserWithEmailAndPassword, sendPasswordResetEmail } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-auth.js";
+import { getFirestore, collection, collectionGroup, doc, getDoc, getDocFromServer, getDocs, getDocsFromServer, setDoc, addDoc, updateDoc, deleteDoc, onSnapshot, increment, deleteField, query, orderBy, limit, where } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore.js";
 
 const firebaseConfig = {
   apiKey: "AIzaSyCMPDpzhZEWZjP9SptREKVSB4dmdhY5cpM",
@@ -39,6 +39,18 @@ const BADGES = [
   { key: 'leadership-list',     label: 'Leadership List',           emoji: '⭐', tier: 'elite'    },
   { key: 'employee-of-month',   label: 'Employee of the Month',     emoji: '🏅', tier: 'elite-plus' },
   // Cert milestone badges — auto-awarded, not available for manual nomination
+  // Productivity milestone badges — 20 pts per 100 units
+  { key: 'large-pack-300',  label: 'Large Pack — 300 Units',   emoji: '📦', tier: 'productivity', points:  60 },
+  { key: 'large-pack-400',  label: 'Large Pack — 400 Units',   emoji: '📦', tier: 'productivity', points:  80 },
+  { key: 'large-pack-500',  label: 'Large Pack — 500 Units',   emoji: '📦', tier: 'productivity', points: 100 },
+  { key: 'small-pack-600',  label: 'Small Pack — 600 Units',   emoji: '📬', tier: 'productivity', points: 120 },
+  { key: 'small-pack-700',  label: 'Small Pack — 700 Units',   emoji: '📬', tier: 'productivity', points: 140 },
+  { key: 'small-pack-800',  label: 'Small Pack — 800 Units',   emoji: '📬', tier: 'productivity', points: 160 },
+  { key: 'small-pack-900',  label: 'Small Pack — 900 Units',   emoji: '📬', tier: 'productivity', points: 180 },
+  { key: 'small-pack-1000', label: 'Small Pack — 1000 Units',  emoji: '📬', tier: 'productivity', points: 200 },
+  { key: 'replen-pick-1000',label: 'Replen Pick — 1000 Units', emoji: '🔄', tier: 'productivity', points: 200 },
+  { key: 'op-pick-600',     label: 'OP Pick — 600 Units',      emoji: '🎯', tier: 'productivity', points: 120 },
+  // Cert milestone badges — auto-awarded, not available for manual nomination
   { key: 'cert-25',  label: '25% Foundations Badge',  aliases: ['Training Starter','Foundations Badge'],  emoji: '📗', tier: 'milestone', autoOnly: true },
   { key: 'cert-50',  label: '50% Core Practitioner', aliases: ['Half Trained','Core Practitioner'],      emoji: '📘', tier: 'milestone', autoOnly: true },
   { key: 'cert-75',  label: '75% Advanced Operator', aliases: ['Well Trained','Advanced Operator'],      emoji: '📙', tier: 'milestone', autoOnly: true },
@@ -62,7 +74,7 @@ const FLAGS  = {
   'pip':               { label: 'PIP Track',         cls: 'bg-danger' },
   'low-uph':           { label: 'Low UPH',           cls: 'bg-flag-orange' }
 };
-const NOTE_TYPES = ['All','General','Coaching','Recognition','Leadership','Performance'];
+const NOTE_TYPES = ['All','General','Coaching','Recognition','Performance'];
 // Use local calendar date (not UTC) to avoid midnight timezone flip
 function localToday() {
   const d = new Date();
@@ -91,14 +103,19 @@ const ATTENDANCE_TYPES = [
   { key: 'left-early-before',   label: 'Left Early (before half shift)',               points: 1.0, icon: 'fa-sign-out-alt',  color: '#dc2626' },
   { key: 'left-early-after',    label: 'Left Early (after half shift)',                points: 0.5, icon: 'fa-sign-out-alt',  color: '#d97706' },
   { key: 'left-early-sick',     label: 'Early Out — Sick Time Used (no point)',        points: 0,   icon: 'fa-sign-out-alt',  color: '#059669' },
+  { key: 'fmla-pending',        label: 'Pending FMLA',                                 points: 0,   icon: 'fa-file-medical',   color: '#7c3aed' },
+  { key: 'fmla-approved',       label: 'Approved FMLA',                                points: 0,   icon: 'fa-file-medical',   color: '#2563eb' },
+  { key: 'bereavement',         label: 'Bereavement',                                  points: 0,   icon: 'fa-heart',          color: '#64748b' },
+  { key: 'doctors-note',        label: "Called Out — Doctor's Note",                   points: 0,   icon: 'fa-file-medical',   color: '#0891b2' },
 ];
 const POINT_VALUES = {
-  badge:  { standard: 25, elite: 100, 'elite-plus': 200 },
-  note:   { Recognition: 10, Leadership: 15, Coaching: 0, Performance: 0, General: 0 }
+  badge:  { standard: 25, productivity: 50, elite: 200, 'elite-plus': 300 },
+  note:   { Recognition: 10, Coaching: 0, Performance: 0, General: 0 }
 };
 function badgePoints(badgeLabel) {
   const def = BADGES.find(b => b.label === badgeLabel);
-  return def ? POINT_VALUES.badge[def.tier] : POINT_VALUES.badge.standard;
+  if (!def) return POINT_VALUES.badge.standard;
+  return def.points ?? POINT_VALUES.badge[def.tier] ?? POINT_VALUES.badge.standard;
 }
 function notePoints(noteType) {
   return POINT_VALUES.note[noteType] ?? 0;
@@ -300,6 +317,17 @@ let allLeaders          = [];
 onAuthStateChanged(auth, async (user) => {
   if (user) {
     currentUser = user;
+
+    // Check if this UID belongs to an associate (portal user) — force server read for fresh points
+    const assocQ = query(collection(db, 'associates'), where('viewerUid', '==', user.uid));
+    const assocSnap = await getDocsFromServer(assocQ);
+    if (!assocSnap.empty) {
+      const assocDoc = assocSnap.docs[0];
+      showAssociatePortal();
+      loadAssociatePortal(assocDoc.id, assocDoc.data());
+      return;
+    }
+
     const snap = await getDoc(doc(db, 'users', user.uid));
     if (snap.exists()) {
       const data = snap.data();
@@ -333,7 +361,7 @@ onAuthStateChanged(auth, async (user) => {
     if (currentUserRole !== 'viewer') document.getElementById('addAssocBtn').classList.remove('d-none');
     applyTabVisibility();
     restoreLastView();
-    // Record login event
+    checkPendingNotifications();
     (async () => {
       try {
         const _uSnap2 = await getDoc(doc(db, 'users', user.uid));
@@ -374,11 +402,460 @@ document.getElementById('loginPw').addEventListener('keydown', e => { if (e.key 
 function showLogin() {
   document.getElementById('loginScreen').classList.remove('d-none');
   document.getElementById('appShell').classList.add('d-none');
+  document.getElementById('associatePortal').classList.add('d-none');
 }
 function showApp() {
   document.getElementById('loginScreen').classList.add('d-none');
   document.getElementById('appShell').classList.remove('d-none');
+  document.getElementById('associatePortal').classList.add('d-none');
 }
+function showAssociatePortal() {
+  document.getElementById('loginScreen').classList.add('d-none');
+  document.getElementById('appShell').classList.add('d-none');
+  document.getElementById('associatePortal').classList.remove('d-none');
+}
+// ─── Associate Portal ──────────────────────────────────────────────────
+let _apAssocId = null;
+let _apAttendance = [];
+let _apPointsLog = [];
+let _apAttendancePts = 0;
+
+window.loadAssociatePortal = async (assocId, assocData) => {
+  _apAssocId = assocId;
+
+  // Always do a direct server read by doc ID to guarantee fresh points data
+  let freshData = assocData;
+  try {
+    const directSnap = await getDocFromServer(doc(db, 'associates', assocId));
+    if (directSnap.exists()) freshData = directSnap.data();
+  } catch(e) {
+    // fallback to query data if direct read fails
+  }
+
+  const pts = Number(freshData.points ?? freshData.engagementPoints ?? 0);
+
+
+  // Header
+  document.getElementById('apName').textContent = freshData.name || 'Associate';
+  document.getElementById('apRole').textContent = freshData.role || freshData.department || '';
+  const ptsDisplay = (pts > 0 ? '+' : '') + pts;
+  document.getElementById('apPoints').textContent = ptsDisplay;
+  document.getElementById('apHomePoints').textContent = ptsDisplay;
+
+  // Reports to
+  const apReportsTo = document.getElementById('apReportsTo');
+  if (freshData.reportsTo) {
+    const mgrSnap = await getDocFromServer(doc(db, 'associates', freshData.reportsTo));
+    if (mgrSnap.exists()) {
+      apReportsTo.textContent = 'Reports to ' + mgrSnap.data().name;
+    } else {
+      apReportsTo.textContent = '';
+    }
+  } else {
+    apReportsTo.textContent = '';
+  }
+
+  // Level
+  let level = 'Developing';
+  if (pts >= 200) level = 'Elite';
+  else if (pts >= 100) level = 'Star';
+  else if (pts >= 50) level = 'Rising';
+  document.getElementById('apLevel').textContent = level;
+
+  // Tenure
+  if (freshData.startDate) {
+    const months = Math.floor((Date.now() - new Date(freshData.startDate)) / (1000*60*60*24*30.44));
+    const yrs = Math.floor(months / 12);
+    const mo = months % 12;
+    document.getElementById('apTenure').textContent = yrs > 0 ? `${yrs}yr ${mo}mo tenure` : `${mo}mo tenure`;
+  }
+
+  // Points progress bar
+  const levelThresholds = [0, 50, 100, 200, 400];
+  const curThresh = levelThresholds.reduce((a, t) => pts >= t ? t : a, 0);
+  const nextThresh = levelThresholds.find(t => t > pts) || null;
+  if (nextThresh) {
+    const pct = Math.min(100, Math.round((pts - curThresh) / (nextThresh - curThresh) * 100));
+    document.getElementById('apBarFill').style.width = pct + '%';
+    document.getElementById('apBarLabel').textContent = `${pts} / ${nextThresh}`;
+  } else {
+    document.getElementById('apBarFill').style.width = '100%';
+    document.getElementById('apBarLabel').textContent = 'Max Level';
+  }
+
+  // Load all data in parallel
+  const [badgesSnap, certsDoc, attendSnap, ptsLogSnap, timeOffSnap, oneOnOneSnap] = await Promise.all([
+    getDocs(collection(db, 'badges', assocId, 'entries')),
+    getDoc(doc(db, 'certs', assocId)),           // certs = single doc per associate
+    getDocs(collection(db, 'attendance', assocId, 'entries')),
+    getDocs(query(collection(db, 'pointsLog'), where('associateId', '==', assocId))),
+    getDocs(collection(db, 'timeOff', assocId, 'entries')),
+    getDocs(collection(db, 'oneOnOnes', assocId, 'entries'))
+  ]);
+
+  _apAttendance = attendSnap.docs.map(d => ({ id: d.id, ...d.data() })).sort((a, b) => b.date?.localeCompare(a.date));
+  _apPointsLog = ptsLogSnap.docs.map(d => ({ id: d.id, ...d.data() })).sort((a, b) => b.createdAt?.localeCompare(a.createdAt));
+  _apAttendancePts = Number(freshData.attendancePoints ?? 0);
+
+  // Badges
+  const approvedBadges = badgesSnap.docs.map(d => d.data()).filter(b => b.status === 'approved');
+  const badgesEl = document.getElementById('apBadges');
+  if (approvedBadges.length === 0) {
+    badgesEl.innerHTML = '<span style="font-size:0.78rem;color:#94a3b8;">No badges earned yet.</span>';
+  } else {
+    const BADGE_ICONS = { 'Top Performer':'🏆','Most Improved':'📈','Team Player':'🤝','Perfect Attendance':'📅','Safety Champion':'🦺','Training Leader':'🎓' };
+    badgesEl.innerHTML = approvedBadges.map(b => `<div class="ap-badge-chip">${BADGE_ICONS[b.badge]||'🏅'} ${b.badge}</div>`).join('');
+  }
+
+  // Certs — stored as a single doc with cert names as keys
+  const certsData = certsDoc.exists() ? certsDoc.data() : {};
+  const certedList = CERTS.filter(c => {
+    const key = c.replace(/\s+/g, '_');
+    return certsData[key] && (certsData[key].status === 'certified' || certsData[key].status === 'training');
+  });
+  const certsEl = document.getElementById('apCerts');
+  if (certedList.length === 0) {
+    certsEl.innerHTML = '<span style="font-size:0.78rem;color:#94a3b8;">No certifications on file.</span>';
+  } else {
+    certsEl.innerHTML = certedList.map(c => {
+      const key = c.replace(/\s+/g, '_');
+      const d = certsData[key];
+      const isTraining = d.status === 'training';
+      return `<div class="ap-cert-row">
+        <span style="font-weight:600;color:#1a2744;">${c}</span>
+        <span style="font-size:0.72rem;color:${isTraining ? '#f59e0b' : '#22c55e'};">
+          ${isTraining ? '⏳ In Training' : '✓ Certified'}
+        </span>
+      </div>`;
+    }).join('');
+  }
+
+  // 1:1 history for Schedule tab
+  window._apOneOnOnes = oneOnOneSnap.docs.map(d => ({ id: d.id, ...d.data() }))
+    .sort((a, b) => b.date?.localeCompare(a.date));
+  renderApOneOnOnes(freshData);
+
+  // Time off — sort by startDate
+  const timeOff = timeOffSnap.docs.map(d => ({ id: d.id, ...d.data() }))
+    .sort((a, b) => (a.startDate || '').localeCompare(b.startDate || ''));
+  const toEl = document.getElementById('apTimeOff');
+  if (timeOff.length === 0) {
+    toEl.innerHTML = '<span style="font-size:0.78rem;color:#94a3b8;">No time off on record.</span>';
+  } else {
+    toEl.innerHTML = timeOff.map(t => {
+      const start = t.startDate ? new Date(t.startDate + 'T00:00:00').toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'}) : '';
+      const end   = t.endDate && t.endDate !== t.startDate ? ' – ' + new Date(t.endDate + 'T00:00:00').toLocaleDateString('en-US',{month:'short',day:'numeric'}) : '';
+      return `<div style="display:flex;justify-content:space-between;align-items:center;padding:9px 0;border-bottom:1px solid #f1f5f9;">
+        <div>
+          <div style="font-size:0.82rem;font-weight:600;color:#1a2744;">${start}${end}</div>
+          ${t.note ? `<div style="font-size:0.7rem;color:#94a3b8;">${escapeHtml(t.note)}</div>` : ''}
+        </div>
+        <span style="font-size:0.72rem;color:#64748b;background:#f1f5f9;border-radius:6px;padding:3px 8px;">${t.type || 'Time Off'}</span>
+      </div>`;
+    }).join('');
+  }
+
+  // Upcoming: anniversary + upcoming time off
+  const upcomingEl = document.getElementById('apUpcoming');
+  const today = localToday();
+  let upcomingItems = [];
+  if (freshData.startDate) {
+    const start = new Date(freshData.startDate);
+    const now = new Date();
+    const anniv = new Date(start); anniv.setFullYear(now.getFullYear());
+    if (anniv < now) anniv.setFullYear(now.getFullYear() + 1);
+    const daysToAnniv = Math.ceil((anniv - now) / (1000*60*60*24));
+    if (daysToAnniv <= 90) upcomingItems.push({ icon:'🎂', label:'Work Anniversary', sub:`${anniv.toLocaleDateString('en-US',{month:'short',day:'numeric'})} — ${daysToAnniv} days away` });
+  }
+  // Add upcoming time off (next 90 days)
+  const cutoff = new Date(); cutoff.setDate(cutoff.getDate() + 90);
+  const cutoffStr = cutoff.toISOString().slice(0,10);
+  timeOff.filter(t => t.startDate && t.startDate >= today && t.startDate <= cutoffStr).forEach(t => {
+    const start = new Date(t.startDate + 'T00:00:00').toLocaleDateString('en-US',{month:'short',day:'numeric'});
+    const end   = t.endDate && t.endDate !== t.startDate ? ' – ' + new Date(t.endDate + 'T00:00:00').toLocaleDateString('en-US',{month:'short',day:'numeric'}) : '';
+    upcomingItems.push({ icon:'🏖️', label: t.type || 'Time Off', sub: start + end });
+  });
+  if (upcomingItems.length === 0) {
+    upcomingEl.innerHTML = '<span style="font-size:0.78rem;color:#94a3b8;">Nothing upcoming in the next 90 days.</span>';
+  } else {
+    upcomingEl.innerHTML = upcomingItems.map(u => `<div style="display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid #f1f5f9;">
+      <span style="font-size:1.2rem;">${u.icon}</span>
+      <div><div style="font-size:0.82rem;font-weight:600;color:#1a2744;">${u.label}</div><div style="font-size:0.72rem;color:#94a3b8;">${u.sub}</div></div>
+    </div>`).join('');
+  }
+
+  // Render attendance
+  renderApAttendance();
+};
+
+window.switchApTab = (tab) => {
+  document.querySelectorAll('.ap-tab-panel').forEach(p => p.classList.add('d-none'));
+  document.getElementById('apTab-' + tab).classList.remove('d-none');
+  document.querySelectorAll('.ap-tab').forEach(t => {
+    const isActive = t.dataset.tab === tab;
+    t.style.color = isActive ? '#fff' : 'rgba(255,255,255,0.6)';
+    t.style.borderBottomColor = isActive ? '#f97316' : 'transparent';
+  });
+};
+
+window.renderApAttendance = () => {
+  const el = document.getElementById('apAttendanceList');
+  const summaryEl = document.getElementById('apAttSummary');
+
+  // Attendance points summary card
+  const attPts = _apAttendancePts;
+  const ptsColor = attPts >= 9 ? '#dc2626' : attPts >= 6 ? '#f97316' : attPts >= 3 ? '#f59e0b' : '#22c55e';
+  const ptsStatus = attPts >= 10 ? 'Termination Level' : attPts >= 9 ? 'Final Warning' : attPts >= 6 ? 'Written Warning' : attPts >= 3 ? 'Documented Verbal' : 'Good Standing';
+  const activeCount = _apAttendance.filter(a => !a.expired).length;
+  summaryEl.innerHTML = `<div style="background:#fff;border-radius:14px;padding:16px;margin-bottom:16px;box-shadow:0 2px 10px rgba(0,0,0,0.07);">
+    <div style="font-size:0.72rem;color:#64748b;text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px;">Attendance Points</div>
+    <div style="display:flex;align-items:center;justify-content:space-between;">
+      <div style="font-size:2.4rem;font-weight:800;color:${ptsColor};line-height:1;">${attPts % 1 === 0 ? attPts : attPts.toFixed(1)}</div>
+      <div style="background:${ptsColor};color:#fff;border-radius:8px;padding:5px 12px;font-size:0.75rem;font-weight:700;">${ptsStatus}</div>
+    </div>
+    <div style="font-size:0.7rem;color:#94a3b8;margin-top:4px;">${activeCount} active event${activeCount !== 1 ? 's' : ''}</div>
+  </div>`;
+
+  if (_apAttendance.length === 0) {
+    el.innerHTML = '<div style="text-align:center;color:#94a3b8;font-size:0.82rem;padding:24px 0;">No attendance events on record.</div>';
+  } else {
+    el.innerHTML = `<div style="background:#fff;border-radius:14px;padding:12px 16px;box-shadow:0 2px 10px rgba(0,0,0,0.07);">` +
+      _apAttendance.map(a => {
+        const typeInfo = ATTENDANCE_TYPES.find(t => t.key === a.type);
+        const label = typeInfo?.label || a.type || 'Event';
+        const evtPts = a.points ?? typeInfo?.points ?? 0;
+        const expired = a.expired;
+        const ptsStr = expired
+          ? `<span style="font-size:0.72rem;color:#94a3b8;text-decoration:line-through;">${evtPts} pts</span>`
+          : evtPts === 0
+            ? `<span style="font-size:0.72rem;color:#22c55e;font-weight:700;">0 pts</span>`
+            : `<span style="font-size:0.72rem;color:#dc2626;font-weight:700;">+${evtPts} pts</span>`;
+        return `<div style="display:flex;align-items:center;gap:12px;padding:10px 0;border-bottom:1px solid #f1f5f9;${expired ? 'opacity:0.5;' : ''}">
+          <div style="width:6px;height:32px;border-radius:3px;background:${typeInfo?.color || '#64748b'};flex-shrink:0;"></div>
+          <div style="flex:1;min-width:0;">
+            <div style="font-size:0.82rem;font-weight:600;color:#1a2744;${expired ? 'text-decoration:line-through;' : ''}">${label}</div>
+            <div style="font-size:0.7rem;color:#94a3b8;">${a.date || ''}${a.note ? ' — ' + escapeHtml(a.note) : ''}</div>
+          </div>
+          ${ptsStr}
+        </div>`;
+      }).join('') + '</div>';
+  }
+
+  // Points history
+  const phEl = document.getElementById('apPointsHistory');
+  if (_apPointsLog.length === 0) {
+    phEl.innerHTML = '<span style="font-size:0.78rem;color:#94a3b8;">No points history yet.</span>';
+  } else {
+    phEl.innerHTML = _apPointsLog.slice(0,20).map(p => {
+      const date = p.createdAt ? new Date(p.createdAt).toLocaleDateString('en-US',{month:'short',day:'numeric'}) : '';
+      return `<div style="display:flex;justify-content:space-between;align-items:center;padding:7px 0;border-bottom:1px solid #f1f5f9;font-size:0.8rem;">
+        <div><span style="color:#1a2744;font-weight:600;">${p.reason||p.category}</span><br><span style="font-size:0.7rem;color:#94a3b8;">${date}</span></div>
+        <span style="font-weight:700;color:${p.points>0?'#22c55e':'#dc2626'}">${p.points>0?'+':''}${p.points}</span>
+      </div>`;
+    }).join('');
+  }
+};
+
+window.submitAp1on1 = async () => {
+  const date = document.getElementById('ap1on1Date').value;
+  const note = document.getElementById('ap1on1Note').value.trim();
+  if (!date) { alert('Please select a date.'); return; }
+  const btn = document.querySelector('#apTab-schedule .btn-orange');
+  if (btn) { btn.disabled = true; btn.textContent = 'Sending…'; }
+  try {
+    // Write to oneOnOneRequests so supervisor gets notified
+    await addDoc(collection(db, 'oneOnOneRequests'), {
+      associateId: _apAssocId,
+      requestedDate: date,
+      note,
+      status: 'pending',
+      createdAt: new Date().toISOString()
+    });
+    document.getElementById('ap1on1Date').value = '';
+    document.getElementById('ap1on1Note').value = '';
+    const succ = document.getElementById('ap1on1Success');
+    succ.classList.remove('d-none');
+    setTimeout(() => succ.classList.add('d-none'), 3000);
+  } catch(e) {
+    alert('Could not submit request. Please try again.');
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = 'Submit Request'; }
+  }
+};
+
+window.renderApOneOnOnes = (assocData) => {
+  const histEl = document.getElementById('apOneOnOneHistory');
+  if (!histEl) return;
+
+  // Show scheduled next 1:1 if one exists
+  const nextDate = assocData?.next1on1;
+  const nextBy = assocData?.next1on1By;
+  const scheduledEl = document.getElementById('apScheduled1on1');
+  if (scheduledEl) {
+    if (nextDate) {
+      const formatted = new Date(nextDate + 'T00:00:00').toLocaleDateString('en-US',{weekday:'long',month:'long',day:'numeric'});
+      scheduledEl.innerHTML = `<div style="background:#fff8f1;border:1px solid #fed7aa;border-radius:10px;padding:12px 14px;margin-bottom:16px;">
+        <div style="font-size:0.72rem;color:#f97316;font-weight:700;text-transform:uppercase;letter-spacing:.5px;margin-bottom:2px;">Scheduled 1:1</div>
+        <div style="font-weight:700;color:#1a2744;">${formatted}</div>
+        ${nextBy ? `<div style="font-size:0.75rem;color:#64748b;">with ${escapeHtml(nextBy)}</div>` : ''}
+      </div>`;
+    } else {
+      scheduledEl.innerHTML = '';
+    }
+  }
+
+  // Meeting history
+  const history = window._apOneOnOnes || [];
+  if (history.length === 0) {
+    histEl.innerHTML = '<span style="font-size:0.78rem;color:#94a3b8;">No completed meetings on record.</span>';
+  } else {
+    histEl.innerHTML = history.map(m => {
+      const d = m.date ? new Date(m.date + 'T00:00:00').toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'}) : '—';
+      return `<div style="padding:10px 0;border-bottom:1px solid #f1f5f9;">
+        <div style="display:flex;justify-content:space-between;align-items:center;">
+          <span style="font-weight:600;font-size:0.82rem;color:#1a2744;">${d}</span>
+          ${m.conductedBy ? `<span style="font-size:0.72rem;color:#64748b;">w/ ${escapeHtml(m.conductedBy)}</span>` : ''}
+        </div>
+        ${m.topics ? `<div style="font-size:0.75rem;color:#64748b;margin-top:3px;">${escapeHtml(m.topics)}</div>` : ''}
+        ${m.notes ? `<div style="font-size:0.78rem;color:#374151;margin-top:4px;font-style:italic;">"${escapeHtml(m.notes)}"</div>` : ''}
+      </div>`;
+    }).join('');
+  }
+};
+
+// ─── Access Request (Login Page) ───────────────────────────────────────
+window.showRequestForm = () => {
+  document.getElementById('requestAccessSection').classList.add('d-none');
+  document.getElementById('requestAccessForm').classList.remove('d-none');
+};
+window.cancelRequestForm = () => {
+  document.getElementById('requestAccessForm').classList.add('d-none');
+  document.getElementById('requestAccessSection').classList.remove('d-none');
+  document.getElementById('reqSuccess').classList.add('d-none');
+};
+window.submitAccessRequest = async () => {
+  const first = document.getElementById('reqFirstName').value.trim();
+  const last = document.getElementById('reqLastName').value.trim();
+  const email = document.getElementById('reqEmail').value.trim();
+  if (!first || !last || !email) { alert('Please fill in all fields.'); return; }
+  const btn = document.querySelector('#requestAccessForm .btn-orange');
+  if (btn) { btn.disabled = true; btn.textContent = 'Sending…'; }
+  try {
+    await addDoc(collection(db, 'accessRequests'), {
+      firstName: first, lastName: last, email,
+      fullName: `${first} ${last}`,
+      status: 'pending',
+      createdAt: new Date().toISOString()
+    });
+    document.getElementById('reqFirstName').value = '';
+    document.getElementById('reqLastName').value = '';
+    document.getElementById('reqEmail').value = '';
+    document.getElementById('reqSuccess').classList.remove('d-none');
+  } catch(e) {
+    alert('Could not submit — please contact your manager directly.');
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = 'Send Request'; }
+  }
+};
+
+// ─── Notifications ────────────────────────────────────────────────────
+let _notifRequests = [];
+
+async function checkPendingNotifications() {
+  if (!currentUserAssocId) return;
+  try {
+    // Find all associates who report to this user
+    const directReportsSnap = await getDocs(
+      query(collection(db, 'associates'), where('reportsTo', '==', currentUserAssocId))
+    );
+    if (directReportsSnap.empty) return;
+    const directReportIds = directReportsSnap.docs.map(d => d.id);
+
+    // Get pending 1:1 requests from those associates
+    const reqSnap = await getDocs(
+      query(collection(db, 'oneOnOneRequests'), where('status', '==', 'pending'))
+    );
+    _notifRequests = reqSnap.docs
+      .map(d => ({ id: d.id, ...d.data() }))
+      .filter(r => directReportIds.includes(r.associateId));
+
+    if (_notifRequests.length === 0) return;
+
+    // Enrich with associate names
+    const names = directReportsSnap.docs.reduce((m, d) => { m[d.id] = d.data().name; return m; }, {});
+    const count = _notifRequests.length;
+    const nameList = [...new Set(_notifRequests.map(r => names[r.associateId] || 'An associate'))];
+    const preview = nameList.length === 1 ? nameList[0] : nameList.length === 2
+      ? `${nameList[0]} and ${nameList[1]}`
+      : `${nameList[0]} and ${nameList.length - 1} others`;
+
+    document.getElementById('notifText').textContent =
+      `${preview} requested a 1:1 meeting — ${count} pending request${count > 1 ? 's' : ''}`;
+    document.getElementById('notifBanner').classList.remove('d-none');
+  } catch(e) { /* non-critical */ }
+}
+
+window.handleNotifClick = () => {
+  openRequestsInbox();
+};
+
+window.openRequestsInbox = async () => {
+  const el = document.getElementById('requestsInboxList');
+  el.innerHTML = '<p class="text-muted small">Loading…</p>';
+  new bootstrap.Modal(document.getElementById('requestsInboxModal')).show();
+
+  const assocSnap = await getDocs(collection(db, 'associates'));
+  const assocMap = assocSnap.docs.reduce((m, d) => { m[d.id] = d.data().name; return m; }, {});
+
+  // Filter to direct reports if we know the supervisor's assoc ID
+  const snap = await getDocs(query(collection(db, 'oneOnOneRequests'), where('status', '==', 'pending')));
+  let requests = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+
+  if (currentUserAssocId) {
+    const directReportIds = assocSnap.docs
+      .filter(d => d.data().reportsTo === currentUserAssocId)
+      .map(d => d.id);
+    requests = requests.filter(r => directReportIds.includes(r.associateId));
+  }
+
+  if (requests.length === 0) {
+    el.innerHTML = '<p class="text-muted small mb-0 text-center py-3">No pending requests.</p>';
+    return;
+  }
+
+  el.innerHTML = requests.map(r => {
+    const name = assocMap[r.associateId] || 'Unknown';
+    const date = r.requestedDate ? new Date(r.requestedDate).toLocaleDateString('en-US',{weekday:'short',month:'short',day:'numeric'}) : '—';
+    const submitted = r.createdAt ? new Date(r.createdAt).toLocaleDateString('en-US',{month:'short',day:'numeric'}) : '';
+    return `<div class="d-flex align-items-start gap-3 p-3 rounded mb-2" style="background:#fff8f1;border:1px solid #fed7aa;" id="inbox-${r.id}">
+      <div style="flex:1;">
+        <div class="fw-semibold" style="color:#1a2744;">${escapeHtml(name)}</div>
+        <div style="font-size:0.78rem;color:#f97316;font-weight:600;margin-top:2px;"><i class="fas fa-calendar me-1"></i>${date}</div>
+        ${r.note ? `<div style="font-size:0.78rem;color:#64748b;margin-top:4px;font-style:italic;">"${escapeHtml(r.note)}"</div>` : ''}
+        <div style="font-size:0.7rem;color:#94a3b8;margin-top:4px;">Submitted ${submitted}</div>
+      </div>
+      <div class="d-flex flex-column gap-1 flex-shrink-0">
+        <button class="btn btn-sm btn-orange py-0 px-2" onclick="resolveInboxRequest('${r.id}','confirmed')">Confirm</button>
+        <button class="btn btn-sm btn-outline-secondary py-0 px-2" onclick="resolveInboxRequest('${r.id}','dismissed')">Dismiss</button>
+      </div>
+    </div>`;
+  }).join('');
+};
+
+window.resolveInboxRequest = async (reqId, status) => {
+  await updateDoc(doc(db, 'oneOnOneRequests', reqId), { status, resolvedAt: new Date().toISOString() });
+  document.getElementById('inbox-' + reqId)?.remove();
+  const el = document.getElementById('requestsInboxList');
+  if (el && !el.querySelector('[id^="inbox-"]')) {
+    el.innerHTML = '<p class="text-muted small mb-0 text-center py-3">All caught up!</p>';
+    dismissNotifBanner();
+  }
+};
+
+window.dismissNotifBanner = () => {
+  document.getElementById('notifBanner').classList.add('d-none');
+};
+
 function showView(view) {
   document.querySelectorAll('.view').forEach(v => v.classList.add('d-none'));
   document.getElementById(view + 'View').classList.remove('d-none');
@@ -1143,7 +1620,7 @@ function renderNotes(notes) {
       ${notes.length ? 'No notes of this type.' : 'No notes yet. Add the first one to build this associate\'s profile.'}</div>`;
     return;
   }
-  const typeColors = { General:'bg-secondary', Coaching:'bg-warning text-dark', Recognition:'bg-success', Leadership:'bg-primary', Performance:'bg-purple' };
+  const typeColors = { General:'bg-secondary', Coaching:'bg-warning text-dark', Recognition:'bg-success', Performance:'bg-purple' };
   container.innerHTML = filtered.map(n => `
     <div class="note-card mb-3">
       <div class="d-flex justify-content-between align-items-start mb-2">
@@ -1158,12 +1635,13 @@ function renderNotes(notes) {
         </div>
       </div>
       <div class="note-text">${escapeHtml(n.text)}</div>
-      ${n.screenshotData ? `<div class="mt-2"><img src="${n.screenshotData}" alt="Performance screenshot" style="max-width:100%;max-height:320px;border-radius:6px;border:1px solid #e2e8f0;cursor:pointer;" onclick="window.open(this.src,'_blank')"></div>` : ''}
+      ${n.screenshotData ? `<div class="mt-2"><img src="${n.screenshotData}" alt="Performance screenshot" style="max-width:100%;max-height:320px;border-radius:6px;border:1px solid #e2e8f0;cursor:zoom-in;" onclick="openScreenshotLightbox(this.src)"></div>` : ''}
     </div>`).join('');
 }
 
 window.openAddNote = () => {
   document.getElementById('noteForm').reset();
+  window._pendingScreenshotData = null;
   document.getElementById('screenshotPreview').innerHTML = '';
   document.getElementById('screenshotSection').style.display = 'none';
   bootstrap.Modal.getOrCreateInstance(document.getElementById('noteModal')).show();
@@ -1175,16 +1653,73 @@ window.onNoteTypeChange = (sel) => {
     document.getElementById('screenshotPreview').innerHTML = '';
   }
 };
+window.openScreenshotLightbox = (src) => {
+  // Remove any existing lightbox
+  document.getElementById('_screenshotLightbox')?.remove();
+  const overlay = document.createElement('div');
+  overlay.id = '_screenshotLightbox';
+  overlay.style.cssText = 'position:fixed;inset:0;z-index:99999;background:rgba(0,0,0,0.85);display:flex;flex-direction:column;align-items:center;justify-content:center;padding:24px;';
+  overlay.innerHTML = `
+    <div style="position:relative;max-width:95vw;max-height:90vh;display:flex;flex-direction:column;align-items:center;gap:12px;">
+      <div style="display:flex;gap:10px;width:100%;justify-content:flex-end;">
+        <button onclick="(function(){var w=window.open('','_blank');w.document.write('<img src=\\''+document.getElementById('_lbImg').src+'\\' style=\\'max-width:100%\\'>');w.document.close();w.print();w.close();})()"
+          style="background:#fff;color:#1e293b;border:none;border-radius:6px;padding:6px 16px;font-size:0.85rem;font-weight:600;cursor:pointer;display:flex;align-items:center;gap:6px;">
+          <i class="fas fa-print"></i> Print
+        </button>
+        <button onclick="document.getElementById('_screenshotLightbox').remove()"
+          style="background:rgba(255,255,255,0.15);color:#fff;border:none;border-radius:6px;padding:6px 16px;font-size:0.85rem;font-weight:600;cursor:pointer;">
+          ✕ Close
+        </button>
+      </div>
+      <img id="_lbImg" src="${src}" style="max-width:90vw;max-height:80vh;border-radius:8px;box-shadow:0 8px 32px rgba(0,0,0,0.5);object-fit:contain;">
+    </div>`;
+  // Click backdrop to close
+  overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.remove(); });
+  document.body.appendChild(overlay);
+};
+function _showScreenshotPreview(dataUrl) {
+  document.getElementById('screenshotPreview').innerHTML =
+    `<div style="position:relative;display:inline-block;margin-top:8px;">
+      <img src="${dataUrl}" style="max-width:100%;max-height:200px;border-radius:6px;border:1px solid #c4b5fd;">
+      <button type="button" onclick="clearScreenshot()" title="Remove"
+        style="position:absolute;top:-8px;right:-8px;background:#ef4444;color:#fff;border:none;border-radius:50%;width:22px;height:22px;font-size:13px;line-height:1;cursor:pointer;">&times;</button>
+    </div>`;
+}
+window._pendingScreenshotData = null;
+window.clearScreenshot = () => {
+  window._pendingScreenshotData = null;
+  document.getElementById('noteScreenshot').value = '';
+  document.getElementById('screenshotPreview').innerHTML = '';
+};
 window.previewScreenshot = (input) => {
   const file = input.files[0];
   if (!file) return;
   const reader = new FileReader();
-  reader.onload = e => {
-    document.getElementById('screenshotPreview').innerHTML =
-      `<img src="${e.target.result}" style="max-width:100%;max-height:200px;border-radius:6px;border:1px solid #e2e8f0;margin-top:8px;">`;
-  };
+  reader.onload = e => { window._pendingScreenshotData = e.target.result; _showScreenshotPreview(e.target.result); };
   reader.readAsDataURL(file);
 };
+window.handleScreenshotDrop = (e) => {
+  const file = [...(e.dataTransfer.files || [])].find(f => f.type.startsWith('image/'));
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = ev => { window._pendingScreenshotData = ev.target.result; _showScreenshotPreview(ev.target.result); };
+  reader.readAsDataURL(file);
+};
+// Wire paste listener to the note modal
+document.addEventListener('DOMContentLoaded', () => {
+  const noteModal = document.getElementById('noteModal');
+  if (noteModal) {
+    noteModal.addEventListener('paste', (e) => {
+      if (document.getElementById('screenshotSection')?.style.display === 'none') return;
+      const item = [...(e.clipboardData?.items || [])].find(i => i.type.startsWith('image/'));
+      if (!item) return;
+      const file = item.getAsFile();
+      const reader = new FileReader();
+      reader.onload = ev => { window._pendingScreenshotData = ev.target.result; _showScreenshotPreview(ev.target.result); };
+      reader.readAsDataURL(file);
+    });
+  }
+});
 // ─── Activity Tracking ────────────────────────────────────────────────
 function recordActivity(assocId) {
   updateDoc(doc(db, 'associates', assocId), { lastActivityAt: new Date().toISOString() });
@@ -1224,19 +1759,31 @@ window.saveNote = async () => {
   const text = document.getElementById('noteText').value.trim();
   const type = document.getElementById('noteType').value;
   if (!text) { alert('Note text is required'); return; }
+  // Capture baseline points NOW — before any awaits
+  const _basePoints = Number(allAssociates.find(a => a.id === currentAssociateId)?.points) || 0;
 
   const btn = document.getElementById('saveNoteBtn');
   btn.disabled = true; btn.textContent = 'Saving…';
   try {
-    // Compress screenshot if Performance type and file selected
+    // Use pasted/dropped/selected screenshot for Performance notes
     let screenshotData = null;
-    if (type === 'Performance') {
-      const fileInput = document.getElementById('noteScreenshot');
-      if (fileInput && fileInput.files[0]) {
-        btn.textContent = 'Compressing…';
-        screenshotData = await compressScreenshot(fileInput.files[0]);
-        btn.textContent = 'Saving…';
-      }
+    if (type === 'Performance' && window._pendingScreenshotData) {
+      btn.textContent = 'Compressing…';
+      // _pendingScreenshotData is already a data URL — compress via canvas
+      screenshotData = await new Promise((resolve) => {
+        const img = new Image();
+        img.onload = () => {
+          const MAX_W = 900;
+          let w = img.width, h = img.height;
+          if (w > MAX_W) { h = Math.round(h * MAX_W / w); w = MAX_W; }
+          const canvas = document.createElement('canvas');
+          canvas.width = w; canvas.height = h;
+          canvas.getContext('2d').drawImage(img, 0, 0, w, h);
+          resolve(canvas.toDataURL('image/jpeg', 0.72));
+        };
+        img.src = window._pendingScreenshotData;
+      });
+      btn.textContent = 'Saving…';
     }
 
     const userSnap = await getDoc(doc(db, 'users', currentUser.uid));
@@ -1253,23 +1800,41 @@ window.saveNote = async () => {
     if (pts !== 0) {
       await updateDoc(doc(db, 'associates', currentAssociateId), { points: increment(pts) });
       await logPoints(currentAssociateId, 'Note', `${type} note added`, pts);
+      // Update points UI immediately — immune to onSnapshot race
+      const newPts = _basePoints + pts;
+      const ptsStat = document.getElementById('statPoints');
+      if (ptsStat) { ptsStat.textContent = (newPts > 0 ? '+' : '') + newPts; ptsStat.style.color = pointsColor(newPts); }
+      const curAssoc = allAssociates.find(a => a.id === currentAssociateId);
+      if (curAssoc) curAssoc.points = newPts;
     }
     bootstrap.Modal.getInstance(document.getElementById('noteModal')).hide();
+    listenNotes(currentAssociateId);
   } finally {
     btn.disabled = false; btn.textContent = 'Save Note';
   }
 };
 window.deleteNote = async (noteId) => {
   if (!confirm('Delete this note?')) return;
+  const _basePoints = Number(allAssociates.find(a => a.id === currentAssociateId)?.points) || 0;
   const noteSnap = await getDoc(doc(db, 'notes', currentAssociateId, 'entries', noteId));
+  let ptsDelta = 0;
   if (noteSnap.exists()) {
     const pts = notePoints(noteSnap.data().type);
     if (pts !== 0) {
+      ptsDelta = -pts;
       await updateDoc(doc(db, 'associates', currentAssociateId), { points: increment(-pts) });
       await logPoints(currentAssociateId, 'Note', `${noteSnap.data().type} note removed`, -pts);
     }
   }
   await deleteDoc(doc(db, 'notes', currentAssociateId, 'entries', noteId));
+  if (ptsDelta !== 0) {
+    const newPts = _basePoints + ptsDelta;
+    const ptsStat = document.getElementById('statPoints');
+    if (ptsStat) { ptsStat.textContent = (newPts > 0 ? '+' : '') + newPts; ptsStat.style.color = pointsColor(newPts); }
+    const curAssoc = allAssociates.find(a => a.id === currentAssociateId);
+    if (curAssoc) curAssoc.points = newPts;
+  }
+  listenNotes(currentAssociateId);
 };
 
 // ─── Login Credentials (admin only) ───────────────────────────────────
@@ -1373,6 +1938,7 @@ window.saveCred = async () => {
       createdAt: new Date().toISOString()
     });
     bootstrap.Modal.getInstance(document.getElementById('credModal')).hide();
+    listenCreds(currentAssociateId);
   } finally {
     btn.disabled = false; btn.textContent = 'Save';
   }
@@ -1381,6 +1947,7 @@ window.saveCred = async () => {
 window.deleteCred = async (credId) => {
   if (!confirm('Delete this credential entry?')) return;
   await deleteDoc(doc(db, 'credentials', currentAssociateId, 'entries', credId));
+  listenCreds(currentAssociateId);
 };
 
 // ─── Private Watch Notes ───────────────────────────────────────────────
@@ -1607,6 +2174,7 @@ window.saveBadgeNomination = async () => {
     associateId: currentAssociateId, associateName: assoc?.name || ''
   });
   bootstrap.Modal.getInstance(document.getElementById('badgeModal')).hide();
+  listenBadges(currentAssociateId);
   alert(`"${badge}" nomination submitted — an admin will review it.`);
 };
 window.approveBadge = async (associateId, badgeId) => {
@@ -1628,6 +2196,19 @@ window.approveBadge = async (associateId, badgeId) => {
   const pts = badgePoints(badgeLabel);
   await updateDoc(doc(db, 'associates', associateId), { points: increment(pts) });
   await logPoints(associateId, 'Badge', `Badge approved: ${badgeLabel}`, pts);
+
+  // Read the true post-write value directly from Firestore — avoids all stale cache / onSnapshot races
+  const freshSnap = await getDoc(doc(db, 'associates', associateId));
+  const truePts = freshSnap.exists() ? (Number(freshSnap.data().points) || 0) : 0;
+  const cachedAssoc = allAssociates.find(a => a.id === associateId);
+  if (cachedAssoc) cachedAssoc.points = truePts;
+
+  // If this associate's profile is open, update the points stat immediately
+  if (associateId === currentAssociateId) {
+    const ptsStat = document.getElementById('statPoints');
+    if (ptsStat) { ptsStat.textContent = (truePts > 0 ? '+' : '') + truePts; ptsStat.style.color = pointsColor(truePts); }
+    listenBadges(associateId);
+  }
 };
 window.rejectBadge = async (associateId, badgeId) => {
   if (!confirm('Reject and remove this nomination?')) return;
@@ -2712,7 +3293,7 @@ window.generateCorrectiveAction = async (tierKey, overrideAssocId) => {
   </tr>
   <tr>
     <td class="field-cell"><div class="field-label">Manager :</div><div class="field-value" style="text-align:center">${managerName}</div></td>
-    <td class="field-cell"><div class="field-label">Department :</div><div class="field-value" style="text-align:center">LAS1 Inbound Operations</div></td>
+    <td class="field-cell"><div class="field-label">Department :</div><div class="field-value" style="text-align:center">${assoc.department || 'LAS1 Operations'}</div></td>
   </tr>
 
   <!-- Type of Warning -->
@@ -2991,8 +3572,9 @@ function clearCache(key) { delete _viewCache[key]; }
 const TIME_OFF_TYPES = {
   'vacation':   { label: 'Vacation',              color: '#0ea5e9', bg: '#e0f2fe', text: '#0c4a6e' },
   'unpaid':     { label: 'Unpaid Day Off',         color: '#dc2626', bg: '#fee2e2', text: '#7f1d1d' },
-  'fmla':       { label: 'FMLA / Medical',         color: '#059669', bg: '#d1fae5', text: '#064e3b' },
-  'leave':      { label: 'Leave of Absence',       color: '#6b7280', bg: '#f3f4f6', text: '#1f2937' },
+  'fmla':        { label: 'FMLA / Medical',         color: '#059669', bg: '#d1fae5', text: '#064e3b' },
+  'bereavement': { label: 'Bereavement',            color: '#475569', bg: '#e2e8f0', text: '#1e293b' },
+  'leave':       { label: 'Leave of Absence',       color: '#6b7280', bg: '#f3f4f6', text: '#1f2937' },
   'prehire':    { label: 'Pre-Hire Approved',      color: '#7c3aed', bg: '#ede9fe', text: '#4c1d95' }
 };
 
@@ -3187,6 +3769,7 @@ window.saveTimeOff = async () => {
   clearCache('milestones_firestore');
   recordActivity(assocId);
   bootstrap.Modal.getInstance(document.getElementById('timeOffModal')).hide();
+  loadTimeOff();
 };
 
 window.deleteTimeOff = async (assocId, entryId) => {
@@ -3194,7 +3777,7 @@ window.deleteTimeOff = async (assocId, entryId) => {
   await deleteDoc(doc(db, 'timeOff', assocId, 'entries', entryId));
   clearCache('todayTimeOff');
   clearCache('milestones_firestore');
-  // listener handles re-render automatically
+  loadTimeOff();
 };
 
 // ─── Today's Attendance Stats (cached) ───────────────────────────────
@@ -3916,8 +4499,18 @@ function renderHRRecords(records) {
             .map(k => `<span class="badge" style="background:#e2e8f0;color:#333;font-weight:500;margin-right:3px;font-size:0.72rem">${k.charAt(0).toUpperCase()+k.slice(1)}</span>`)
             .join('');
           const color = TIER_COLORS[r.tier] || '#555';
+          const submittedHtml = r.submittedToHR
+            ? `<div style="display:inline-flex;align-items:center;gap:4px;background:#dcfce7;border:1px solid #86efac;border-radius:5px;padding:2px 7px;font-size:0.7rem;color:#15803d;font-weight:600;margin-top:3px;">
+                <i class="fas fa-check-circle"></i> ${new Date(r.submittedToHR).toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'})}
+               </div>`
+            : `<button onclick="logHRSubmission(${i})" style="display:inline-flex;align-items:center;gap:4px;background:#f0f9ff;border:1px solid #7dd3fc;border-radius:5px;padding:2px 7px;font-size:0.7rem;color:#0369a1;font-weight:600;cursor:pointer;margin-top:3px;" title="Log date submitted to HR">
+                <i class="fas fa-paper-plane"></i> Submit to HR
+               </button>`;
           return `<tr>
-            <td style="padding:10px 14px;font-weight:600">${r.associateName || '—'}</td>
+            <td style="padding:10px 14px">
+              <div style="font-weight:600;">${r.associateName || '—'}</div>
+              ${submittedHtml}
+            </td>
             <td style="padding:10px 14px"><span style="color:${color};font-weight:600;font-size:0.82rem">${r.tierLabel || r.tier || '—'}</span></td>
             <td style="padding:10px 14px;text-align:center">${r.points ?? '—'}</td>
             <td style="padding:10px 14px;color:#555">${r.signedAt || '—'}</td>
@@ -3934,6 +4527,22 @@ function renderHRRecords(records) {
 }
 
 window.filterHRRecords = () => renderHRRecords(window._hrRecords || []);
+
+window.logHRSubmission = async (idx) => {
+  const records = window._hrRecords || [];
+  const r = records[idx];
+  if (!r) return;
+  if (r.submittedToHR) return; // already logged
+
+  const now = new Date().toISOString();
+  try {
+    await updateDoc(doc(db, 'signedWarnings', r.id), { submittedToHR: now });
+    records[idx].submittedToHR = now;
+    renderHRRecords(records);
+  } catch(e) {
+    alert('Could not save — ' + e.message);
+  }
+};
 
 function _loadScript(src, globalCheck) {
   return new Promise((resolve, reject) => {
@@ -4184,7 +4793,8 @@ window.listenOneOnOnes = async (associateId) => {
     window._1on1Entries = entries;
     render1on1Log(entries);
     const badge = document.getElementById('oneOnOneCountBadge');
-    if (badge) badge.textContent = entries.length;
+    const hasScheduled = !!(allAssociates.find(a => a.id === associateId)?.next1on1);
+    if (badge) badge.textContent = entries.length + (hasScheduled ? 1 : 0);
   } catch(e) {
     container.innerHTML = '<div class="text-muted small py-2">No meetings logged yet.</div>';
     window._1on1Entries = [];
@@ -4339,12 +4949,14 @@ window.loadAdminPanel = () => {
       </td>
     </tr>`).join('');
   });
+  loadOneOnOneRequests();
   loadPendingBadges();
   loadLoginLog();
   loadTabToggles();
   loadResetPanel();
   loadAttResetPanel();
   loadCertResetPanel();
+  loadPendingAccessRequests();
 };
 
 // ─── Tab Visibility ───────────────────────────────────────────────────
@@ -4957,6 +5569,132 @@ window.resetAllCerts = async () => {
     loadCertResetPanel();
   } catch(e) { alert('Error: ' + e.message); }
   finally { btn.disabled = false; btn.innerHTML = '<i class="fas fa-trash-alt me-1"></i>Reset All Certs'; }
+};
+
+// ─── 1:1 Meeting Requests ─────────────────────────────────────────────
+window.loadOneOnOneRequests = async () => {
+  const el = document.getElementById('oneOnOneRequestsList');
+  if (!el) return;
+  el.innerHTML = '<p class="text-muted small">Loading…</p>';
+
+  const snap = await getDocs(query(collection(db, 'oneOnOneRequests'), where('status', '==', 'pending')));
+  if (snap.empty) {
+    el.innerHTML = '<p class="text-muted small mb-0">No pending requests.</p>';
+    return;
+  }
+
+  // Load associate names
+  const assocSnap = await getDocs(collection(db, 'associates'));
+  const assocMap = assocSnap.docs.reduce((m, d) => { m[d.id] = d.data().name; return m; }, {});
+
+  el.innerHTML = snap.docs.map(d => {
+    const r = d.data();
+    const name = assocMap[r.associateId] || 'Unknown Associate';
+    const date = r.requestedDate ? new Date(r.requestedDate).toLocaleDateString('en-US',{weekday:'short',month:'short',day:'numeric'}) : '—';
+    const submitted = r.createdAt ? new Date(r.createdAt).toLocaleDateString('en-US',{month:'short',day:'numeric'}) : '';
+    return `<div class="d-flex align-items-start gap-3 p-3 rounded mb-2" style="background:#fff8f1;border:1px solid #fed7aa;" id="oor-${d.id}">
+      <div style="flex:1;">
+        <div class="fw-semibold small" style="color:#1a2744;">${escapeHtml(name)}</div>
+        <div style="font-size:0.78rem;color:#f97316;font-weight:600;margin-top:1px;"><i class="fas fa-calendar me-1"></i>Requested: ${date}</div>
+        ${r.note ? `<div style="font-size:0.78rem;color:#64748b;margin-top:4px;font-style:italic;">"${escapeHtml(r.note)}"</div>` : ''}
+        <div style="font-size:0.7rem;color:#94a3b8;margin-top:4px;">Submitted ${submitted}</div>
+      </div>
+      <div class="d-flex flex-column gap-1">
+        <button class="btn btn-sm btn-orange py-0" onclick="resolveOneOnOne('${d.id}','confirmed')">Confirm</button>
+        <button class="btn btn-sm btn-outline-secondary py-0" onclick="resolveOneOnOne('${d.id}','dismissed')">Dismiss</button>
+      </div>
+    </div>`;
+  }).join('');
+};
+
+window.resolveOneOnOne = async (reqId, status) => {
+  await updateDoc(doc(db, 'oneOnOneRequests', reqId), { status, resolvedAt: new Date().toISOString() });
+  document.getElementById('oor-' + reqId)?.remove();
+  const el = document.getElementById('oneOnOneRequestsList');
+  if (el && !el.querySelector('[id^="oor-"]')) {
+    el.innerHTML = '<p class="text-muted small mb-0">No pending requests.</p>';
+  }
+  // Hide banner if no more pending
+  const remaining = document.querySelectorAll('[id^="oor-"]').length;
+  if (remaining === 0) dismissNotifBanner();
+};
+
+// ─── Portal Access Management ──────────────────────────────────────────
+window.loadPendingAccessRequests = async () => {
+  const el = document.getElementById('accessRequestsList');
+  if (!el) return;
+  el.innerHTML = '<p class="text-muted small">Loading…</p>';
+
+  const snap = await getDocs(query(collection(db, 'accessRequests'), where('status', '==', 'pending')));
+
+  if (snap.empty) {
+    el.innerHTML = '<p class="text-muted small mb-0">No pending requests.</p>';
+    return;
+  }
+
+  el.innerHTML = snap.docs.map(d => {
+    const r = d.data();
+    const date = r.createdAt ? new Date(r.createdAt).toLocaleDateString('en-US',{month:'short',day:'numeric',hour:'numeric',minute:'2-digit'}) : '';
+    return `<div class="d-flex align-items-center justify-content-between gap-3 p-2 rounded mb-2" style="background:#f8fafc;border:1px solid #e2e8f0;" id="req-${d.id}">
+      <div>
+        <div class="fw-semibold small">${escapeHtml(r.fullName || '')}</div>
+        <div class="text-muted" style="font-size:0.78rem;">${escapeHtml(r.email || '')} &bull; ${date}</div>
+      </div>
+      <button class="btn btn-sm btn-outline-secondary py-0 flex-shrink-0" onclick="dismissRequest('${d.id}')">Dismiss</button>
+    </div>`;
+  }).join('');
+};
+
+window.dismissRequest = async (reqId) => {
+  await updateDoc(doc(db, 'accessRequests', reqId), { status: 'dismissed' });
+  document.getElementById('req-' + reqId)?.remove();
+  const el = document.getElementById('accessRequestsList');
+  if (el && !el.querySelector('[id^="req-"]')) {
+    el.innerHTML = '<p class="text-muted small mb-0">No pending requests.</p>';
+  }
+};
+
+window.grantPortalAccess = async (assocId) => {
+  const emailInput = document.getElementById(`pa-email-${assocId}`);
+  const email = emailInput?.value.trim();
+  if (!email) { alert('Please enter the associate\'s email address.'); return; }
+
+  const btn = event.target;
+  btn.disabled = true; btn.textContent = 'Creating…';
+
+  try {
+    // Create Firebase Auth account via secondary app so admin isn't logged out
+    const secondaryApp = initializeApp(firebaseConfig, 'secondary_' + Date.now());
+    const secondaryAuth = getAuth(secondaryApp);
+    const tempPw = Math.random().toString(36).slice(-10) + 'A1!';
+    const cred = await createUserWithEmailAndPassword(secondaryAuth, email, tempPw);
+    const newUid = cred.user.uid;
+    await deleteApp(secondaryApp);
+
+    // Save UID + email to associate doc
+    await updateDoc(doc(db, 'associates', assocId), { viewerUid: newUid, portalEmail: email });
+
+    // Send password setup email to associate
+    await sendPasswordResetEmail(auth, email);
+
+    alert(`✅ Portal access granted!\n\nA password setup email has been sent to:\n${email}\n\nThey can log in once they set their password.`);
+
+    // Refresh the list
+    loadPendingAccessRequests();
+  } catch(e) {
+    if (e.code === 'auth/email-already-in-use') {
+      alert('That email already has a Firebase account. If this associate already has portal access, check the Active status above.');
+    } else {
+      alert('Error: ' + e.message);
+    }
+    btn.disabled = false; btn.textContent = 'Grant Access';
+  }
+};
+
+window.revokePortalAccess = async (assocId) => {
+  if (!confirm('Remove portal access for this associate? They will no longer be able to log in.')) return;
+  await updateDoc(doc(db, 'associates', assocId), { viewerUid: deleteField(), portalEmail: deleteField() });
+  loadPendingAccessRequests();
 };
 
 // ─── Attendance Bulk Import ────────────────────────────────────────────
@@ -5986,6 +6724,13 @@ body { background:#f4f6fb; font-family:'Segoe UI',sans-serif; margin:0; }
 .rec-title { font-weight:700; font-size:0.82rem; color:var(--navy); }
 .rec-detail { font-size:0.78rem; color:#6b7280; margin-top:2px; }
 
+/* Notification Banner */
+@keyframes notifPulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.7; }
+}
+#notifBell { animation: notifPulse 1.2s ease-in-out infinite; display:inline-block; }
+
 /* Admin */
 .admin-card { background:#fff; border-radius:12px; padding:1.5rem; border:1px solid #e5e7eb; margin-bottom:1.5rem; }
 .pending-badge-card { background:#fffbeb; border:1px solid #fde68a; border-radius:10px; padding:0.875rem 1rem; }
@@ -6069,6 +6814,57 @@ body { background:#f4f6fb; font-family:'Segoe UI',sans-serif; margin:0; }
   font-size:0.8rem; cursor:pointer; transition:background .15s;
 }
 .kanban-log-row:hover { background:#e0f2fe; }
+
+/* ── Associate Portal ── */
+#associatePortal {
+  min-height:100vh;
+  background:#f1f5f9;
+  font-family: 'Inter', sans-serif;
+}
+.ap-tab-panel { animation: fadeInUp .2s ease; }
+@keyframes fadeInUp { from { opacity:0; transform:translateY(8px); } to { opacity:1; transform:translateY(0); } }
+.ap-note-card {
+  background:#fff;
+  border-radius:12px;
+  padding:14px;
+  margin-bottom:10px;
+  box-shadow:0 2px 8px rgba(0,0,0,0.06);
+  border-left:4px solid #e2e8f0;
+}
+.ap-note-card.type-Coaching { border-left-color:#f59e0b; }
+.ap-note-card.type-Recognition { border-left-color:#22c55e; }
+.ap-note-card.type-Performance { border-left-color:#7c3aed; }
+.ap-note-card.type-General { border-left-color:#64748b; }
+.ap-attendance-card {
+  background:#fff;
+  border-radius:12px;
+  padding:12px 14px;
+  margin-bottom:8px;
+  box-shadow:0 2px 8px rgba(0,0,0,0.06);
+  display:flex;
+  align-items:center;
+  gap:12px;
+}
+.ap-badge-chip {
+  background:#1a2744;
+  color:#fff;
+  border-radius:20px;
+  padding:5px 12px;
+  font-size:0.72rem;
+  font-weight:600;
+  display:flex;
+  align-items:center;
+  gap:5px;
+}
+.ap-cert-row {
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  padding:8px 0;
+  border-bottom:1px solid #f1f5f9;
+  font-size:0.82rem;
+}
+.ap-cert-row:last-child { border-bottom:none; }
 </style>
 </head>
 <body>
@@ -6090,7 +6886,134 @@ body { background:#f4f6fb; font-family:'Segoe UI',sans-serif; margin:0; }
       <input type="password" id="loginPw" class="form-control" placeholder="••••••••" autocomplete="current-password">
     </div>
     <button id="loginBtn" class="btn btn-orange w-100 py-2 fw-semibold" onclick="doLogin()">Sign In</button>
-    <p class="text-center text-muted small mt-3 mb-0">No account? Contact your admin.</p>
+    <hr class="my-3">
+    <div id="requestAccessSection">
+      <p class="text-center text-muted small mb-2">Don't have an account?</p>
+      <button class="btn btn-outline-secondary w-100 btn-sm" onclick="showRequestForm()">Request Access</button>
+    </div>
+    <div id="requestAccessForm" class="d-none">
+      <p class="small fw-semibold mb-2 text-center" style="color:#1a2744">Request Portal Access</p>
+      <div class="mb-2">
+        <input type="text" id="reqFirstName" class="form-control form-control-sm" placeholder="First Name">
+      </div>
+      <div class="mb-2">
+        <input type="text" id="reqLastName" class="form-control form-control-sm" placeholder="Last Name">
+      </div>
+      <div class="mb-3">
+        <input type="email" id="reqEmail" class="form-control form-control-sm" placeholder="Your Email Address">
+      </div>
+      <div class="d-flex gap-2">
+        <button class="btn btn-orange btn-sm flex-fill" onclick="submitAccessRequest()">Send Request</button>
+        <button class="btn btn-outline-secondary btn-sm" onclick="cancelRequestForm()">Cancel</button>
+      </div>
+      <div id="reqSuccess" class="d-none alert alert-success py-2 mt-2 small text-center">Request sent! Your manager will set up your access.</div>
+    </div>
+  </div>
+</div>
+
+<!-- ASSOCIATE PORTAL -->
+<div id="associatePortal" class="d-none">
+  <!-- Portal Header -->
+  <div id="apHeader" style="background:linear-gradient(135deg,#1a2744 0%,#243460 100%);padding:20px 16px 0;position:sticky;top:0;z-index:100;box-shadow:0 2px 12px rgba(0,0,0,0.3);">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;">
+      <div>
+        <div style="color:#f97316;font-size:0.7rem;font-weight:700;letter-spacing:1px;text-transform:uppercase;">LAS1 Associate Portal</div>
+        <div id="apName" style="color:#fff;font-size:1.15rem;font-weight:700;line-height:1.2;"></div>
+        <div id="apRole" style="color:#94a3b8;font-size:0.75rem;margin-top:1px;"></div>
+        <div id="apReportsTo" style="color:#64748b;font-size:0.7rem;margin-top:1px;"></div>
+      </div>
+      <div style="text-align:right;">
+        <div id="apPoints" style="color:#f97316;font-size:1.6rem;font-weight:800;line-height:1;"></div>
+        <div style="color:#94a3b8;font-size:0.68rem;text-transform:uppercase;letter-spacing:.5px;">Engagement Pts</div>
+        <button onclick="doLogout()" style="margin-top:6px;background:rgba(255,255,255,0.1);border:1px solid rgba(255,255,255,0.2);color:#fff;border-radius:6px;padding:3px 10px;font-size:0.7rem;cursor:pointer;">Sign Out</button>
+      </div>
+    </div>
+    <!-- Tab Bar -->
+    <div style="display:flex;border-bottom:2px solid rgba(255,255,255,0.1);">
+      <button class="ap-tab active" data-tab="home" onclick="switchApTab('home')" style="flex:1;background:none;border:none;color:#fff;padding:10px 4px;font-size:0.78rem;font-weight:600;border-bottom:2px solid #f97316;margin-bottom:-2px;cursor:pointer;"><i class="fas fa-home" style="display:block;font-size:1rem;margin-bottom:2px;"></i>Home</button>
+      <button class="ap-tab" data-tab="attendance" onclick="switchApTab('attendance')" style="flex:1;background:none;border:none;color:rgba(255,255,255,0.6);padding:10px 4px;font-size:0.78rem;font-weight:600;border-bottom:2px solid transparent;margin-bottom:-2px;cursor:pointer;"><i class="fas fa-calendar-check" style="display:block;font-size:1rem;margin-bottom:2px;"></i>Attendance</button>
+      <button class="ap-tab" data-tab="schedule" onclick="switchApTab('schedule')" style="flex:1;background:none;border:none;color:rgba(255,255,255,0.6);padding:10px 4px;font-size:0.78rem;font-weight:600;border-bottom:2px solid transparent;margin-bottom:-2px;cursor:pointer;"><i class="fas fa-calendar-alt" style="display:block;font-size:1rem;margin-bottom:2px;"></i>Schedule</button>
+    </div>
+  </div>
+
+  <!-- Portal Body -->
+  <div id="apBody" style="padding:16px;max-width:480px;margin:0 auto;padding-bottom:80px;">
+    <!-- HOME TAB -->
+    <div id="apTab-home" class="ap-tab-panel">
+      <!-- Points Card -->
+      <div style="background:linear-gradient(135deg,#1a2744,#243460);border-radius:14px;padding:18px;color:#fff;margin-bottom:16px;box-shadow:0 4px 16px rgba(26,39,68,0.18);">
+        <div style="display:flex;justify-content:space-between;align-items:flex-start;">
+          <div>
+            <div style="font-size:0.72rem;color:#94a3b8;text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px;">Current Points Balance</div>
+            <div id="apHomePoints" style="font-size:2.8rem;font-weight:800;color:#f97316;line-height:1;"></div>
+            <div style="font-size:0.72rem;color:#94a3b8;margin-top:4px;">Engagement Points</div>
+          </div>
+          <div style="text-align:right;">
+            <div id="apLevel" style="background:#f97316;border-radius:8px;padding:6px 14px;font-size:0.8rem;font-weight:700;"></div>
+            <div id="apTenure" style="color:#94a3b8;font-size:0.72rem;margin-top:6px;"></div>
+          </div>
+        </div>
+        <div id="apPointsBar" style="margin-top:14px;">
+          <div style="display:flex;justify-content:space-between;font-size:0.68rem;color:#94a3b8;margin-bottom:4px;">
+            <span>Progress to next level</span>
+            <span id="apBarLabel"></span>
+          </div>
+          <div style="background:rgba(255,255,255,0.15);border-radius:99px;height:6px;overflow:hidden;">
+            <div id="apBarFill" style="height:100%;background:#f97316;border-radius:99px;transition:width .5s;"></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Recent Badges -->
+      <div style="background:#fff;border-radius:14px;padding:16px;margin-bottom:16px;box-shadow:0 2px 10px rgba(0,0,0,0.07);">
+        <div style="font-size:0.85rem;font-weight:700;color:#1a2744;margin-bottom:10px;"><i class="fas fa-medal me-1" style="color:#f97316;"></i>My Badges</div>
+        <div id="apBadges" style="display:flex;flex-wrap:wrap;gap:8px;"></div>
+      </div>
+
+      <!-- Certifications -->
+      <div style="background:#fff;border-radius:14px;padding:16px;margin-bottom:16px;box-shadow:0 2px 10px rgba(0,0,0,0.07);">
+        <div style="font-size:0.85rem;font-weight:700;color:#1a2744;margin-bottom:10px;"><i class="fas fa-certificate me-1" style="color:#f97316;"></i>My Certifications</div>
+        <div id="apCerts" style=""></div>
+      </div>
+
+      <!-- Upcoming: Anniversary / Point Expirations -->
+      <div style="background:#fff;border-radius:14px;padding:16px;margin-bottom:16px;box-shadow:0 2px 10px rgba(0,0,0,0.07);">
+        <div style="font-size:0.85rem;font-weight:700;color:#1a2744;margin-bottom:10px;"><i class="fas fa-bell me-1" style="color:#f97316;"></i>Upcoming</div>
+        <div id="apUpcoming"></div>
+      </div>
+    </div>
+
+    <!-- ATTENDANCE TAB -->
+    <div id="apTab-attendance" class="ap-tab-panel d-none">
+      <!-- Attendance points summary -->
+      <div id="apAttSummary"></div>
+      <!-- Events list -->
+      <div style="font-size:0.85rem;font-weight:700;color:#1a2744;margin-bottom:10px;"><i class="fas fa-calendar-check me-1" style="color:#f97316;"></i>Attendance Events</div>
+      <div id="apAttendanceList" style="margin-bottom:20px;"></div>
+      <!-- Engagement points history -->
+      <div style="background:#fff;border-radius:14px;padding:16px;box-shadow:0 2px 10px rgba(0,0,0,0.07);">
+        <div style="font-size:0.85rem;font-weight:700;color:#1a2744;margin-bottom:10px;"><i class="fas fa-star me-1" style="color:#f97316;"></i>Engagement Points History</div>
+        <div id="apPointsHistory"></div>
+      </div>
+    </div>
+
+    <!-- SCHEDULE TAB -->
+    <div id="apTab-schedule" class="ap-tab-panel d-none">
+
+      <!-- Upcoming 1:1 (set by manager in main dashboard) -->
+      <div id="apScheduled1on1" class="mb-3"></div>
+
+      <!-- Meeting History -->
+      <div style="font-size:0.85rem;font-weight:700;color:#1a2744;margin-bottom:10px;"><i class="fas fa-comments me-1" style="color:#f97316;"></i>1:1 Meeting History</div>
+      <div style="background:#fff;border-radius:14px;padding:16px;margin-bottom:16px;box-shadow:0 2px 10px rgba(0,0,0,0.07);">
+        <div id="apOneOnOneHistory"></div>
+      </div>
+
+      <!-- Time Off -->
+      <div style="font-size:0.85rem;font-weight:700;color:#1a2744;margin-bottom:10px;"><i class="fas fa-umbrella-beach me-1" style="color:#f97316;"></i>Time Off</div>
+      <div id="apTimeOff" style="background:#fff;border-radius:14px;padding:16px;box-shadow:0 2px 10px rgba(0,0,0,0.07);"></div>
+    </div>
+
   </div>
 </div>
 
@@ -6139,6 +7062,20 @@ body { background:#f4f6fb; font-family:'Segoe UI',sans-serif; margin:0; }
   </nav>
 
   <main id="mainContent">
+
+    <!-- NOTIFICATION BANNER -->
+    <div id="notifBanner" class="d-none" style="margin:-1.5rem -1.5rem 1.5rem -1.5rem;">
+      <div id="notifBannerInner" style="background:linear-gradient(90deg,#1a2744,#f97316);padding:10px 20px;display:flex;align-items:center;justify-content:space-between;gap:12px;cursor:pointer;" onclick="handleNotifClick()">
+        <div style="display:flex;align-items:center;gap:10px;">
+          <span id="notifBell" style="font-size:1.2rem;">🔔</span>
+          <span id="notifText" style="color:#fff;font-size:0.85rem;font-weight:600;"></span>
+        </div>
+        <div style="display:flex;align-items:center;gap:10px;">
+          <span style="color:rgba(255,255,255,0.8);font-size:0.78rem;">Click to view →</span>
+          <button onclick="event.stopPropagation();dismissNotifBanner()" style="background:rgba(255,255,255,0.15);border:none;color:#fff;border-radius:4px;padding:2px 8px;font-size:0.75rem;cursor:pointer;">✕</button>
+        </div>
+      </div>
+    </div>
 
     <!-- DASHBOARD VIEW -->
     <div id="dashboardView" class="view">
@@ -6373,7 +7310,6 @@ body { background:#f4f6fb; font-family:'Segoe UI',sans-serif; margin:0; }
             <button class="note-filter-btn filter-active" data-type="All" onclick="setNoteFilter('All')">All</button>
             <button class="note-filter-btn" data-type="Coaching" onclick="setNoteFilter('Coaching')">Coaching</button>
             <button class="note-filter-btn" data-type="Recognition" onclick="setNoteFilter('Recognition')">Recognition</button>
-            <button class="note-filter-btn" data-type="Leadership" onclick="setNoteFilter('Leadership')">Leadership</button>
             <button class="note-filter-btn" data-type="Performance" onclick="setNoteFilter('Performance')">Performance</button>
             <button class="note-filter-btn" data-type="General" onclick="setNoteFilter('General')">General</button>
           </div>
@@ -6598,51 +7534,81 @@ body { background:#f4f6fb; font-family:'Segoe UI',sans-serif; margin:0; }
       </div>
 
       <div class="row g-4">
-        <div class="col-lg-6">
+
+        <!-- Point Values -->
+        <div class="col-12">
           <div class="admin-card">
-            <h6 class="fw-bold mb-3" style="color:var(--navy)"><i class="fas fa-star me-2" style="color:var(--orange)"></i>Point Values</h6>
-            <table class="table table-sm small mb-0">
-              <thead class="table-light"><tr><th>Action</th><th class="text-end">Points</th></tr></thead>
-              <tbody>
-                <tr><td>Standard Badge approved (Top Performer, Team Player, etc.)</td><td class="text-end fw-bold text-success">+25</td></tr>
-                <tr><td>Elite Badge approved (Leadership List)</td><td class="text-end fw-bold text-success">+100</td></tr>
-                <tr><td>Employee of the Month badge approved</td><td class="text-end fw-bold text-success">+200</td></tr>
-                <tr><td>Recognition note added</td><td class="text-end fw-bold text-success">+10</td></tr>
-                <tr><td>Leadership note added</td><td class="text-end fw-bold text-success">+15</td></tr>
-                <tr><td>Certification earned</td><td class="text-end fw-bold text-success">+10</td></tr>
-                <tr><td>Coaching note</td><td class="text-end text-muted">0</td></tr>
-                <tr><td>General note</td><td class="text-end text-muted">0</td></tr>
-                <tr><td>Warning note added</td><td class="text-end fw-bold text-danger">-10</td></tr>
-                <tr><td>PIP note added</td><td class="text-end fw-bold text-danger">-150</td></tr>
-                <tr><td>Certification removed</td><td class="text-end fw-bold text-danger">-10</td></tr>
-                <tr><td>Badge removed</td><td class="text-end fw-bold text-danger">Reversed</td></tr>
-                <tr><td>Note deleted</td><td class="text-end fw-bold text-danger">Reversed</td></tr>
-              </tbody>
-            </table>
+            <h6 class="fw-bold mb-3" style="color:var(--navy)"><i class="fas fa-star me-2" style="color:var(--orange)"></i>Engagement Point Values</h6>
+            <div class="row g-3">
+              <div class="col-md-6">
+                <div class="fw-semibold small mb-2" style="color:var(--navy)">Badges</div>
+                <table class="table table-sm small mb-0">
+                  <thead class="table-light"><tr><th>Badge</th><th class="text-end">Points</th></tr></thead>
+                  <tbody>
+                    <tr><td>Standard Badge (Top Performer, Team Player, etc.)</td><td class="text-end fw-bold text-success">+25</td></tr>
+                    <tr><td>Leadership List <span class="badge" style="background:#e0e7ff;color:#3730a3;font-size:0.65rem">Elite</span></td><td class="text-end fw-bold text-success">+200</td></tr>
+                    <tr><td>Employee of the Month <span class="badge" style="background:#fef3c7;color:#92400e;font-size:0.65rem">Elite+</span></td><td class="text-end fw-bold text-success">+300</td></tr>
+                    <tr><td colspan="2" class="pt-2 fw-semibold small" style="color:var(--navy)">Productivity Badges <span class="text-muted fw-normal">(20 pts per 100 units)</span></td></tr>
+                    <tr><td>Large Pack — 300 Units 📦</td><td class="text-end fw-bold text-success">+60</td></tr>
+                    <tr><td>Large Pack — 400 Units 📦</td><td class="text-end fw-bold text-success">+80</td></tr>
+                    <tr><td>Large Pack — 500 Units 📦</td><td class="text-end fw-bold text-success">+100</td></tr>
+                    <tr><td>Small Pack — 600 Units 📬</td><td class="text-end fw-bold text-success">+120</td></tr>
+                    <tr><td>Small Pack — 700 Units 📬</td><td class="text-end fw-bold text-success">+140</td></tr>
+                    <tr><td>Small Pack — 800 Units 📬</td><td class="text-end fw-bold text-success">+160</td></tr>
+                    <tr><td>Small Pack — 900 Units 📬</td><td class="text-end fw-bold text-success">+180</td></tr>
+                    <tr><td>Small Pack — 1000 Units 📬</td><td class="text-end fw-bold text-success">+200</td></tr>
+                    <tr><td>Replen Pick — 1000 Units 🔄</td><td class="text-end fw-bold text-success">+200</td></tr>
+                    <tr><td>OP Pick — 600 Units 🎯</td><td class="text-end fw-bold text-success">+120</td></tr>
+                  </tbody>
+                </table>
+              </div>
+              <div class="col-md-6">
+                <div class="fw-semibold small mb-2" style="color:var(--navy)">Notes & Certifications</div>
+                <table class="table table-sm small mb-0">
+                  <thead class="table-light"><tr><th>Action</th><th class="text-end">Points</th></tr></thead>
+                  <tbody>
+                    <tr><td>Recognition note added</td><td class="text-end fw-bold text-success">+10</td></tr>
+                    <tr><td>Leadership note added</td><td class="text-end fw-bold text-success">+15</td></tr>
+                    <tr><td>Certification earned</td><td class="text-end fw-bold text-success">+10</td></tr>
+                    <tr><td>Coaching note</td><td class="text-end text-muted">0</td></tr>
+                    <tr><td>General note</td><td class="text-end text-muted">0</td></tr>
+                    <tr><td>Warning note added</td><td class="text-end fw-bold text-danger">−10</td></tr>
+                    <tr><td>PIP note added</td><td class="text-end fw-bold text-danger">−150</td></tr>
+                    <tr><td>Certification removed</td><td class="text-end fw-bold text-danger">−10</td></tr>
+                    <tr><td>Badge removed</td><td class="text-end fw-bold text-danger">Reversed</td></tr>
+                    <tr><td>Note deleted</td><td class="text-end fw-bold text-danger">Reversed</td></tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
           </div>
         </div>
 
+        <!-- Dashboard -->
         <div class="col-lg-6">
           <div class="admin-card">
             <h6 class="fw-bold mb-3" style="color:var(--navy)"><i class="fas fa-users me-2" style="color:var(--orange)"></i>Dashboard</h6>
             <p class="small text-muted">Associate cards show only non-leadership staff. Leadership appears in the "Meet Your Leadership Team" section above. Cards are sorted alphabetically. Use the search bar to find by name or employee ID, or filter by shift, status, flag, or certification.</p>
-            <p class="small text-muted mb-0">The stats bar shows: <strong>Active</strong> (all active roster), <strong>Associates</strong> (excluding leadership), <strong>In Building</strong> (active minus today's call-outs and early-outs, including leadership), and <strong>Call Outs / Early Outs</strong> for today.</p>
+            <p class="small text-muted mb-0">The stats bar shows: <strong>Active</strong> (all active roster), <strong>Associates</strong> (excluding leadership), <strong>In Building</strong> (active minus today's call-outs and early-outs), and <strong>Call Outs / Early Outs</strong> for today.</p>
             <h6 class="fw-bold mb-2 mt-3" style="color:var(--navy)"><i class="fas fa-id-card me-2" style="color:var(--orange)"></i>Card Banners</h6>
-            <p class="small text-muted mb-0">Associate cards display a colored banner when a status is active today: <span style="color:#dc2626;font-weight:600">OUT</span> (call-out logged), <span style="color:#ea580c;font-weight:600">Early Out</span> (early-out logged), <span style="color:#d97706;font-weight:600">Tardy</span> (late arrival), or a <span style="color:#0ea5e9;font-weight:600">time-off type</span> (Vacation, FMLA, etc.). Banners reset automatically each day. An orange pulsing dot appears when a profile has new activity you haven't viewed.</p>
+            <p class="small text-muted mb-0">Cards show a single colored banner for the associate's current status today. Attendance events take priority: <span style="color:#7c0000;font-weight:600">NCNS</span>, <span style="color:#dc2626;font-weight:600">OUT</span> (call-out), <span style="color:#ea580c;font-weight:600">Early Out</span>, <span style="color:#d97706;font-weight:600">Tardy</span>. If no attendance event, the time-off type shows: <span style="color:#0ea5e9;font-weight:600">Vacation</span>, <span style="color:#059669;font-weight:600">FMLA / Medical</span>, <span style="color:#475569;font-weight:600">Bereavement</span>, etc. Only one banner appears at a time. Banners reset automatically each day.</p>
             <h6 class="fw-bold mb-2 mt-3" style="color:var(--navy)"><i class="fas fa-user me-2" style="color:var(--orange)"></i>Associate Profiles</h6>
-            <p class="small text-muted mb-0">Click any card to open a profile. From there you can add manager notes, toggle certifications, nominate badges, set a Reports To supervisor, and view the private watch notes section (supervisors/admins only). Use the Export PDF button to generate a printable summary for HR records.</p>
+            <p class="small text-muted mb-0">Click any card to open a profile. From there you can add manager notes, toggle certifications, nominate badges, log attendance, schedule 1:1 meetings, and manage time off. Use Export PDF to generate a printable HR summary.</p>
             <h6 class="fw-bold mb-2 mt-3" style="color:var(--navy)"><i class="fas fa-sticky-note me-2" style="color:var(--orange)"></i>Note Types</h6>
-            <p class="small text-muted mb-0"><strong>Coaching:</strong> performance conversations, no point impact. <strong>Recognition:</strong> positive callouts, +10 pts. <strong>Leadership:</strong> leadership potential observations, +15 pts. <strong>Warning:</strong> formal warnings, -10 pts. <strong>PIP:</strong> performance improvement plan entries, -150 pts. <strong>General:</strong> misc notes, no point impact.</p>
+            <p class="small text-muted mb-0"><strong>Coaching:</strong> 0 pts. <strong>Recognition:</strong> +10 pts. <strong>Leadership:</strong> +15 pts. <strong>Warning:</strong> −10 pts. <strong>PIP:</strong> −150 pts. <strong>General:</strong> 0 pts.</p>
           </div>
         </div>
 
+        <!-- Achievement Badges -->
         <div class="col-lg-6">
           <div class="admin-card">
             <h6 class="fw-bold mb-3" style="color:var(--navy)"><i class="fas fa-trophy me-2" style="color:var(--orange)"></i>Achievement Badges</h6>
-            <p class="small text-muted">Leads, Supervisors, and Admins can nominate associates for badges. Each nomination requires a reason. Nominations show as <em>Pending</em> until an Admin approves them in the Admin panel. Once approved, points are awarded automatically. Badges stack; an associate can earn the same badge multiple times. Hover over a badge to see the nomination reason.</p>
+            <p class="small text-muted">Leads, Supervisors, and Admins can nominate associates for badges. Each nomination requires a reason and goes to an Admin for approval. Once approved, points are awarded automatically. Badges stack — an associate can earn the same badge multiple times.</p>
+            <p class="small text-muted mb-0"><strong>Tiers:</strong> Standard (25 pts) · Productivity (60–200 pts based on units) · Elite/Leadership List (200 pts) · Employee of the Month (300 pts). Productivity badges cover Large Pack (300–500 units), Small Pack (600–1000 units), Replen Pick (1000 units), and OP Pick (600 units).</p>
           </div>
         </div>
 
+        <!-- Certifications -->
         <div class="col-lg-6">
           <div class="admin-card">
             <h6 class="fw-bold mb-3" style="color:var(--navy)"><i class="fas fa-certificate me-2" style="color:var(--orange)"></i>Certifications</h6>
@@ -6650,6 +7616,7 @@ body { background:#f4f6fb; font-family:'Segoe UI',sans-serif; margin:0; }
           </div>
         </div>
 
+        <!-- Private Watch Notes -->
         <div class="col-lg-6">
           <div class="admin-card">
             <h6 class="fw-bold mb-3" style="color:var(--navy)"><i class="fas fa-lock me-2" style="color:var(--orange)"></i>Private Watch Notes</h6>
@@ -6657,26 +7624,32 @@ body { background:#f4f6fb; font-family:'Segoe UI',sans-serif; margin:0; }
           </div>
         </div>
 
+        <!-- Attendance Reference -->
         <div class="col-12">
           <div class="admin-card">
-            <h6 class="fw-bold mb-3" style="color:var(--navy)"><i class="fas fa-calendar-alt me-2" style="color:var(--orange)"></i>Attendance Point Reference</h6>
+            <h6 class="fw-bold mb-3" style="color:var(--navy)"><i class="fas fa-calendar-alt me-2" style="color:var(--orange)"></i>Attendance Event Reference</h6>
             <div class="table-responsive">
               <table class="table table-sm small mb-0">
-                <thead class="table-light"><tr><th>Event</th><th>Description</th><th class="text-end">Points</th></tr></thead>
+                <thead class="table-light"><tr><th>Event</th><th>Description</th><th class="text-end">Att. Points</th></tr></thead>
                 <tbody>
-                  <tr><td><i class="fas fa-phone-slash me-2" style="color:#dc2626"></i><strong>Call Out</strong></td><td class="text-muted">Absent with no sick time coverage</td><td class="text-end fw-bold" style="color:#dc2626">+1.0</td></tr>
-                  <tr><td><i class="fas fa-notes-medical me-2" style="color:#d97706"></i><strong>Call Out — Sick Time (half+)</strong></td><td class="text-muted">Uses sick time covering at least half the shift</td><td class="text-end fw-bold" style="color:#d97706">+0.5</td></tr>
-                  <tr><td><i class="fas fa-notes-medical me-2" style="color:#dc2626"></i><strong>Call Out — Sick Time (under half)</strong></td><td class="text-muted">Uses sick time but not enough to cover half shift</td><td class="text-end fw-bold" style="color:#dc2626">+1.0</td></tr>
-                  <tr><td><i class="fas fa-notes-medical me-2" style="color:#059669"></i><strong>Call Out — Sick Time Used (no point)</strong></td><td class="text-muted">Full sick time coverage, recorded for tracking only</td><td class="text-end fw-bold" style="color:#059669">0</td></tr>
-                  <tr><td><i class="fas fa-clock me-2" style="color:#d97706"></i><strong>Late Arrival</strong></td><td class="text-muted">Arrived late but before the half-shift mark</td><td class="text-end fw-bold" style="color:#d97706">+0.5</td></tr>
-                  <tr><td><i class="fas fa-clock me-2" style="color:#dc2626"></i><strong>Late Arrival (after half shift)</strong></td><td class="text-muted">Arrived after the half-shift mark</td><td class="text-end fw-bold" style="color:#dc2626">+1.0</td></tr>
-                  <tr><td><i class="fas fa-sign-out-alt me-2" style="color:#dc2626"></i><strong>Left Early (before half shift)</strong></td><td class="text-muted">Left before completing half the shift</td><td class="text-end fw-bold" style="color:#dc2626">+1.0</td></tr>
-                  <tr><td><i class="fas fa-sign-out-alt me-2" style="color:#d97706"></i><strong>Left Early (after half shift)</strong></td><td class="text-muted">Left after completing more than half the shift</td><td class="text-end fw-bold" style="color:#d97706">+0.5</td></tr>
-                  <tr><td><i class="fas fa-sign-out-alt me-2" style="color:#059669"></i><strong>Early Out — Sick Time Used (no point)</strong></td><td class="text-muted">Left early with full sick time coverage, recorded for tracking only</td><td class="text-end fw-bold" style="color:#059669">0</td></tr>
+                  <tr><td><strong>NCNS</strong></td><td class="text-muted">No call, no show</td><td class="text-end fw-bold" style="color:#7c0000">+2.0</td></tr>
+                  <tr><td><strong>Call Out</strong></td><td class="text-muted">Absent, no sick time coverage</td><td class="text-end fw-bold" style="color:#dc2626">+1.0</td></tr>
+                  <tr><td><strong>Call Out — Sick Time (≥ half shift)</strong></td><td class="text-muted">Sick time covers at least half shift</td><td class="text-end fw-bold" style="color:#d97706">+0.5</td></tr>
+                  <tr><td><strong>Call Out — Sick Time (under half)</strong></td><td class="text-muted">Sick time doesn't cover half shift</td><td class="text-end fw-bold" style="color:#dc2626">+1.0</td></tr>
+                  <tr><td><strong>Call Out — Sick Time Used (no point)</strong></td><td class="text-muted">Full sick time coverage, tracking only</td><td class="text-end fw-bold" style="color:#059669">0</td></tr>
+                  <tr><td><strong>Called Out — Doctor's Note</strong></td><td class="text-muted">Absent with doctor's note on file</td><td class="text-end fw-bold" style="color:#059669">0</td></tr>
+                  <tr><td><strong>Late Arrival</strong></td><td class="text-muted">Arrived late, before half-shift mark</td><td class="text-end fw-bold" style="color:#d97706">+0.5</td></tr>
+                  <tr><td><strong>Late Arrival (after half shift)</strong></td><td class="text-muted">Arrived after half-shift mark</td><td class="text-end fw-bold" style="color:#dc2626">+1.0</td></tr>
+                  <tr><td><strong>Left Early (before half shift)</strong></td><td class="text-muted">Left before completing half shift</td><td class="text-end fw-bold" style="color:#dc2626">+1.0</td></tr>
+                  <tr><td><strong>Left Early (after half shift)</strong></td><td class="text-muted">Left after completing more than half shift</td><td class="text-end fw-bold" style="color:#d97706">+0.5</td></tr>
+                  <tr><td><strong>Early Out — Sick Time Used (no point)</strong></td><td class="text-muted">Left early with full sick time coverage</td><td class="text-end fw-bold" style="color:#059669">0</td></tr>
+                  <tr style="background:#f0fdf4"><td><strong>Pending FMLA</strong></td><td class="text-muted">FMLA application submitted, awaiting approval</td><td class="text-end fw-bold" style="color:#059669">0</td></tr>
+                  <tr style="background:#f0fdf4"><td><strong>Approved FMLA</strong></td><td class="text-muted">FMLA approved — protected leave</td><td class="text-end fw-bold" style="color:#059669">0</td></tr>
+                  <tr style="background:#f0fdf4"><td><strong>Bereavement</strong></td><td class="text-muted">Bereavement leave — recorded for tracking only</td><td class="text-end fw-bold" style="color:#059669">0</td></tr>
                 </tbody>
               </table>
             </div>
-            <p class="small text-muted mt-2 mb-0"><i class="fas fa-info-circle me-1" style="color:var(--orange)"></i>Color coding: <span style="color:#059669;font-weight:600">Green 0–2.9</span> · <span style="color:#ca8a04;font-weight:600">Yellow 3–5.9</span> · <span style="color:#dc2626;font-weight:600">Red 6+</span>. See the Attendance Policy card below for disciplinary thresholds.</p>
+            <p class="small text-muted mt-2 mb-0"><i class="fas fa-info-circle me-1" style="color:var(--orange)"></i>FMLA and Bereavement entries log for documentation but never add attendance points. <span style="color:#059669;font-weight:600">Green 0–2.9</span> · <span style="color:#ca8a04;font-weight:600">Yellow 3–5.9</span> · <span style="color:#ea580c;font-weight:600">Orange 6–8.9</span> · <span style="color:#dc2626;font-weight:600">Red 9+</span></p>
           </div>
         </div>
 
@@ -6688,15 +7661,14 @@ body { background:#f4f6fb; font-family:'Segoe UI',sans-serif; margin:0; }
               <table class="table table-sm small mb-0">
                 <thead class="table-light"><tr><th>Points</th><th>Step</th><th>Action</th></tr></thead>
                 <tbody>
-                  <tr><td><span class="fw-bold" style="color:#059669">0 – 2.9</span></td><td>Good Standing</td><td class="text-muted">No action required. Green indicator.</td></tr>
-                  <tr><td><span class="fw-bold" style="color:#ca8a04">3 – 5.9</span></td><td>Documented Verbal</td><td class="text-muted">Issue a documented verbal warning. Yellow indicator.</td></tr>
-                  <tr><td><span class="fw-bold" style="color:#ea580c">6 – 8.9</span></td><td>Written Warning</td><td class="text-muted">Issue a written warning. Orange indicator.</td></tr>
-                  <tr><td><span class="fw-bold" style="color:#dc2626">9 – 9.9</span></td><td>Final Warning</td><td class="text-muted">Issue a final written warning. Red indicator.</td></tr>
+                  <tr><td><span class="fw-bold" style="color:#059669">0 – 2.9</span></td><td>Good Standing</td><td class="text-muted">No action required.</td></tr>
+                  <tr><td><span class="fw-bold" style="color:#ca8a04">3 – 5.9</span></td><td>Documented Verbal</td><td class="text-muted">Issue a documented verbal warning.</td></tr>
+                  <tr><td><span class="fw-bold" style="color:#ea580c">6 – 8.9</span></td><td>Written Warning</td><td class="text-muted">Issue a written warning.</td></tr>
+                  <tr><td><span class="fw-bold" style="color:#dc2626">9 – 9.9</span></td><td>Final Warning</td><td class="text-muted">Issue a final written warning.</td></tr>
                   <tr style="background:#fee2e2"><td><span class="fw-bold" style="color:#7f1d1d">10+</span></td><td><strong>Termination</strong></td><td class="text-muted">Associate has reached the termination threshold.</td></tr>
                 </tbody>
               </table>
             </div>
-            <p class="small text-muted mt-2 mb-0"><i class="fas fa-info-circle me-1" style="color:var(--orange)"></i>Points accumulate across all attendance events. The Associate filter on the Attendance tracker and the name badge in the log table both reflect the associate's current color/status automatically.</p>
           </div>
         </div>
 
@@ -6704,20 +7676,94 @@ body { background:#f4f6fb; font-family:'Segoe UI',sans-serif; margin:0; }
         <div class="col-lg-6">
           <div class="admin-card">
             <h6 class="fw-bold mb-3" style="color:var(--navy)"><i class="fas fa-flag me-2" style="color:var(--orange)"></i>Associate Flags</h6>
-            <p class="small text-muted mb-2">Leads, Supervisors, and Admins can set a flag on any associate profile to indicate their current situation. Flags appear on the associate card on the dashboard.</p>
+            <p class="small text-muted mb-2">Leads, Supervisors, and Admins can set a flag on any associate profile. Flags appear on the card on the dashboard.</p>
             <table class="table table-sm small mb-0">
               <tbody>
-                <tr><td><span class="badge bg-secondary">No Flag</span></td><td class="text-muted small">Default — no special flag set.</td></tr>
-                <tr><td><span class="badge bg-success">High Potential</span></td><td class="text-muted small">Top performer showing leadership and growth potential.</td></tr>
-                <tr><td><span class="badge bg-warning text-dark">Needs Support</span></td><td class="text-muted small">Associate may need additional coaching or resources.</td></tr>
-                <tr><td><span class="badge bg-danger">Attendance Issue</span></td><td class="text-muted small">Ongoing attendance concerns; see attendance log.</td></tr>
-                <tr><td><span class="badge bg-info text-dark">Leadership Track</span></td><td class="text-muted small">Associate is being developed for a leadership role.</td></tr>
-                <tr><td><span class="badge bg-secondary">Transitioning</span></td><td class="text-muted small">Role change, department transfer, or status change in progress.</td></tr>
-                <tr><td><span class="badge bg-warning text-dark">Watch</span></td><td class="text-muted small">Associate is being monitored for performance or conduct concerns.</td></tr>
-                <tr><td><span class="badge bg-danger">PIP Track</span></td><td class="text-muted small">Associate is on a formal Performance Improvement Plan.</td></tr>
-                <tr><td><span class="badge" style="background:#f97316;color:#fff">Low UPH</span></td><td class="text-muted small">Associate is consistently below target UPH for their role.</td></tr>
+                <tr><td><span class="badge bg-secondary">No Flag</span></td><td class="text-muted small">Default — no special flag.</td></tr>
+                <tr><td><span class="badge bg-success">High Potential</span></td><td class="text-muted small">Top performer with leadership potential.</td></tr>
+                <tr><td><span class="badge bg-warning text-dark">Needs Support</span></td><td class="text-muted small">May need additional coaching or resources.</td></tr>
+                <tr><td><span class="badge bg-danger">Attendance Issue</span></td><td class="text-muted small">Ongoing attendance concerns.</td></tr>
+                <tr><td><span class="badge bg-info text-dark">Leadership Track</span></td><td class="text-muted small">Being developed for a leadership role.</td></tr>
+                <tr><td><span class="badge bg-secondary">Transitioning</span></td><td class="text-muted small">Role change or transfer in progress.</td></tr>
+                <tr><td><span class="badge bg-warning text-dark">Watch</span></td><td class="text-muted small">Being monitored for performance or conduct.</td></tr>
+                <tr><td><span class="badge bg-danger">PIP Track</span></td><td class="text-muted small">On a formal Performance Improvement Plan.</td></tr>
+                <tr><td><span class="badge" style="background:#f97316;color:#fff">Low UPH</span></td><td class="text-muted small">Consistently below target UPH for their role.</td></tr>
               </tbody>
             </table>
+          </div>
+        </div>
+
+        <!-- Time Off -->
+        <div class="col-lg-6">
+          <div class="admin-card">
+            <h6 class="fw-bold mb-3" style="color:var(--navy)"><i class="fas fa-calendar-minus me-2" style="color:var(--orange)"></i>Time Off Calendar</h6>
+            <p class="small text-muted mb-2">The <strong>Time Off</strong> sidebar tab lets supervisors and admins schedule and track associate time away.</p>
+            <ul class="small text-muted ps-3 mb-2">
+              <li><strong>Calendar View:</strong> Click any day to add an entry pre-filled with that date.</li>
+              <li><strong>Types:</strong> Vacation, Sick, Personal, FMLA, Bereavement, Leave of Absence, Out (Other), Unpaid.</li>
+              <li><strong>Card Banners:</strong> When an entry is active today, a banner appears on the associate's card. Only one banner shows at a time — attendance events take priority.</li>
+              <li><strong>Upcoming Events:</strong> Entries within the next 40 days also appear in the Upcoming Events dashboard panel.</li>
+            </ul>
+            <p class="small text-muted mb-0"><i class="fas fa-info-circle me-1" style="color:var(--orange)"></i>Time off and attendance logs are independent. Adding FMLA or Bereavement to both systems will not create duplicate banners or double-count points.</p>
+          </div>
+        </div>
+
+        <!-- HR Records -->
+        <div class="col-lg-6">
+          <div class="admin-card">
+            <h6 class="fw-bold mb-3" style="color:var(--navy)"><i class="fas fa-file-signature me-2" style="color:var(--orange)"></i>HR Records</h6>
+            <p class="small text-muted mb-2">The <strong>HR Records</strong> tab stores all signed corrective action forms. Each record shows the associate name, warning tier, points at time of signing, and signature status.</p>
+            <ul class="small text-muted ps-3 mb-0">
+              <li><strong>Submit to HR:</strong> A blue button under each associate's name lets you log the date the form was physically submitted to HR. Once clicked, it stamps the date and turns green — persists across sessions.</li>
+              <li><strong>View / PDF:</strong> Open the full signed form or download it as a PDF.</li>
+              <li><strong>Filter:</strong> Search by name or filter by warning tier.</li>
+            </ul>
+          </div>
+        </div>
+
+        <!-- 1:1 Meetings -->
+        <div class="col-lg-6">
+          <div class="admin-card">
+            <h6 class="fw-bold mb-3" style="color:var(--navy)"><i class="fas fa-comments me-2" style="color:#6366f1"></i>1:1 Meetings</h6>
+            <p class="small text-muted mb-0">On any associate profile, the <strong>1:1 Meetings</strong> panel lets you schedule upcoming meetings and log completed ones. The badge count reflects both scheduled and completed meetings combined. When a supervisor logs in, a pulsing banner appears if any direct report has a pending 1:1 request. Completed meetings are stored in history and visible on the associate's mobile portal under the Schedule tab.</p>
+          </div>
+        </div>
+
+        <!-- Associate Portal -->
+        <div class="col-12">
+          <div class="admin-card" style="border-left:4px solid var(--orange)">
+            <h6 class="fw-bold mb-3" style="color:var(--navy)"><i class="fas fa-mobile-alt me-2" style="color:var(--orange)"></i>Associate Mobile Portal</h6>
+            <p class="small text-muted mb-2">Associates can log in to a mobile-friendly portal using credentials created by an admin. The portal gives read-only access to their own data — they cannot see other associates' information.</p>
+            <div class="row g-3">
+              <div class="col-md-4">
+                <div class="fw-semibold small mb-1" style="color:var(--navy)">🏠 Home Tab</div>
+                <ul class="small text-muted ps-3 mb-0">
+                  <li>Current engagement points balance</li>
+                  <li>Level (Developing / Rising / Star / Elite)</li>
+                  <li>Progress bar to next level</li>
+                  <li>Approved badges</li>
+                  <li>Certifications on file</li>
+                  <li>Upcoming time off &amp; anniversaries</li>
+                </ul>
+              </div>
+              <div class="col-md-4">
+                <div class="fw-semibold small mb-1" style="color:var(--navy)">📅 Attendance Tab</div>
+                <ul class="small text-muted ps-3 mb-0">
+                  <li>Attendance point total with policy status</li>
+                  <li>Full event list with points per event</li>
+                  <li>Engagement points history</li>
+                </ul>
+              </div>
+              <div class="col-md-4">
+                <div class="fw-semibold small mb-1" style="color:var(--navy)">🗓️ Schedule Tab</div>
+                <ul class="small text-muted ps-3 mb-0">
+                  <li>Next scheduled 1:1 meeting</li>
+                  <li>Completed 1:1 meeting history</li>
+                  <li>Upcoming time off entries</li>
+                </ul>
+              </div>
+            </div>
+            <p class="small text-muted mt-3 mb-0"><strong>Granting access:</strong> In the Admin Panel → Portal Access Management, enter the associate's email and click Grant Access. The system creates their login and sends a password reset email automatically. Associates can also request access from the login page.</p>
           </div>
         </div>
 
@@ -6725,13 +7771,12 @@ body { background:#f4f6fb; font-family:'Segoe UI',sans-serif; margin:0; }
         <div class="col-lg-6">
           <div class="admin-card">
             <h6 class="fw-bold mb-3" style="color:var(--navy)"><i class="fas fa-camera me-2" style="color:var(--orange)"></i>Shift Snapshots</h6>
-            <p class="small text-muted mb-2">Leads, Supervisors, and Admins can import productivity snapshots via the <strong>Import Snapshot</strong> button on the dashboard. Three methods are available:</p>
+            <p class="small text-muted mb-2">Import productivity snapshots via the <strong>Import Snapshot</strong> button on the dashboard. Three methods available:</p>
             <ul class="small text-muted ps-3 mb-0">
-              <li><strong>Upload Image:</strong> Take a screenshot of the shift report — OCR will extract the data automatically.</li>
-              <li><strong>Paste Snapshot:</strong> Select all and copy the shift report, then paste it into the text box.</li>
-              <li><strong>Manual Entry:</strong> Type in the Employee ID, date, UPH, and other fields directly.</li>
+              <li><strong>Upload Image:</strong> OCR extracts the data automatically from a screenshot.</li>
+              <li><strong>Paste Snapshot:</strong> Copy and paste the shift report text.</li>
+              <li><strong>Manual Entry:</strong> Type Employee ID, date, UPH, and units directly.</li>
             </ul>
-            <p class="small text-muted mt-2 mb-0">Snapshots appear on the associate's profile under the <em>Shift Snapshots</em> tab, showing UPH, units, target, and on-pace status over time.</p>
           </div>
         </div>
 
@@ -6739,12 +7784,12 @@ body { background:#f4f6fb; font-family:'Segoe UI',sans-serif; margin:0; }
         <div class="col-lg-6">
           <div class="admin-card">
             <h6 class="fw-bold mb-3" style="color:var(--navy)"><i class="fas fa-calendar-alt me-2" style="color:var(--orange)"></i>Team Attendance Tracker</h6>
-            <p class="small text-muted mb-2">The <strong>Attendance</strong> sidebar tab shows a team-wide view of all logged attendance events. Features include:</p>
+            <p class="small text-muted mb-2">The <strong>Attendance</strong> sidebar shows a team-wide view of all logged events.</p>
             <ul class="small text-muted ps-3 mb-0">
-              <li><strong>At-Risk Panel:</strong> Shows up to 8 associates with the most points in the selected period, with policy step labels.</li>
-              <li><strong>Period Filter:</strong> Scope the view to This Week, This Month, This Year, or All Time.</li>
-              <li><strong>Log Table:</strong> Filter by associate, shift, event type, and date range. Associate names are color-coded by policy status.</li>
-              <li><strong>Calendar:</strong> Visual month calendar showing which days had events.</li>
+              <li><strong>At-Risk Panel:</strong> Up to 8 associates with the most points, with policy step labels.</li>
+              <li><strong>Period Filter:</strong> This Week, This Month, This Year, or All Time.</li>
+              <li><strong>Log Table:</strong> Filter by associate, shift, event type, and date range.</li>
+              <li><strong>Calendar:</strong> Visual month view of which days had events.</li>
             </ul>
           </div>
         </div>
@@ -6753,57 +7798,46 @@ body { background:#f4f6fb; font-family:'Segoe UI',sans-serif; margin:0; }
         <div class="col-lg-6">
           <div class="admin-card">
             <h6 class="fw-bold mb-3" style="color:var(--navy)"><i class="fas fa-key me-2" style="color:#6366f1"></i>System Credentials</h6>
-            <p class="small text-muted mb-0">The <strong>System Credentials</strong> panel on each profile stores system logins (WMS, scheduler, etc.) tied to that associate. Leads and above can add entries; only Admins can delete them. Passwords are masked by default — click the eye icon to reveal or the copy icon to copy without displaying. Credentials are stored in Firebase and are not visible to Viewer-role accounts.</p>
+            <p class="small text-muted mb-0">The <strong>System Credentials</strong> panel stores system logins (WMS, scheduler, etc.) per associate. Leads and above can add entries; only Admins can delete. Passwords are masked by default — click the eye icon to reveal. Not visible to Viewer-role accounts.</p>
           </div>
         </div>
 
-        <div class="col-lg-6">
-          <div class="admin-card">
-            <h6 class="fw-bold mb-3" style="color:var(--navy)"><i class="fas fa-calendar-minus me-2" style="color:var(--orange)"></i>Time Off</h6>
-            <p class="small text-muted mb-2">The <strong>Time Off</strong> sidebar tab lets supervisors and admins schedule and track associate time away. Features include:</p>
-            <ul class="small text-muted ps-3 mb-2">
-              <li><strong>Calendar View:</strong> Click any month tab to switch months. Click a day on the calendar to add a time off entry pre-filled with that date. Associates with active entries appear as colored chips on the calendar.</li>
-              <li><strong>Types:</strong> Vacation, Unpaid Day Off, FMLA / Medical, Leave of Absence, Pre-Hire Approved.</li>
-              <li><strong>Card Banners:</strong> When an entry is active today, a matching banner appears on the associate's dashboard card automatically.</li>
-              <li><strong>Upcoming Events:</strong> Time off starting within the next 40 days also appears in the Upcoming Events panel on the dashboard.</li>
-            </ul>
-            <p class="small text-muted mb-0">Entries are stored per-associate in Firebase and update in real time.</p>
-          </div>
-        </div>
-
+        <!-- Corrective Action -->
         <div class="col-lg-6">
           <div class="admin-card">
             <h6 class="fw-bold mb-3" style="color:var(--navy)"><i class="fas fa-print me-2" style="color:var(--orange)"></i>Corrective Action Form</h6>
-            <p class="small text-muted mb-2">When an associate reaches a warning threshold on the Attendance tab, a <strong>Print Corrective Action</strong> button appears on their warning tier card. Clicking it generates a print-ready corrective action form that includes:</p>
+            <p class="small text-muted mb-2">When an associate reaches a warning threshold on the Attendance tab, a <strong>Print Corrective Action</strong> button appears. The generated form includes:</p>
             <ul class="small text-muted ps-3 mb-0">
-              <li>Associate name, employee ID, hire date, and shift schedule</li>
-              <li>Warning tier (Documented Verbal, Written Warning, Final Warning, Termination)</li>
-              <li>Pre-filled attendance summary with all logged events</li>
-              <li>Manager name (Hector Marron) and signature lines</li>
-              <li>Previous discipline history pulled from logged warnings</li>
+              <li>Associate name, employee ID, hire date, shift</li>
+              <li>Warning tier and pre-filled attendance summary</li>
+              <li>Signature lines and previous discipline history</li>
             </ul>
           </div>
         </div>
 
-        <div class="col-lg-6">
+        <!-- Roles & Permissions -->
+        <div class="col-12">
           <div class="admin-card">
             <h6 class="fw-bold mb-3" style="color:var(--navy)"><i class="fas fa-shield-alt me-2" style="color:var(--orange)"></i>Roles & Permissions</h6>
             <table class="table table-sm small mb-0">
               <thead class="table-light"><tr><th>Action</th><th>Viewer</th><th>Lead</th><th>Supervisor</th><th>Admin</th></tr></thead>
               <tbody>
                 <tr><td>View profiles & notes</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td></tr>
-                <tr><td>Add notes & toggle certs</td><td></td><td>✓</td><td>✓</td><td>✓</td></tr>
+                <tr><td>Add notes, toggle certs, log attendance</td><td></td><td>✓</td><td>✓</td><td>✓</td></tr>
                 <tr><td>Nominate badges</td><td></td><td>✓</td><td>✓</td><td>✓</td></tr>
                 <tr><td>View & add credentials</td><td></td><td>✓</td><td>✓</td><td>✓</td></tr>
+                <tr><td>Schedule 1:1 meetings, manage time off</td><td></td><td>✓</td><td>✓</td><td>✓</td></tr>
                 <tr><td>Delete notes</td><td></td><td></td><td>✓</td><td>✓</td></tr>
                 <tr><td>View private watch notes</td><td></td><td></td><td>✓</td><td>✓</td></tr>
                 <tr><td>Approve/reject badges</td><td></td><td></td><td></td><td>✓</td></tr>
                 <tr><td>Delete credentials</td><td></td><td></td><td></td><td>✓</td></tr>
+                <tr><td>Grant associate portal access</td><td></td><td></td><td></td><td>✓</td></tr>
                 <tr><td>Manage user accounts</td><td></td><td></td><td></td><td>✓</td></tr>
               </tbody>
             </table>
           </div>
         </div>
+
       </div>
     </div>
 
@@ -7029,6 +8063,25 @@ body { background:#f4f6fb; font-family:'Segoe UI',sans-serif; margin:0; }
         </div>
       </div>
 
+      <!-- 1:1 Meeting Requests -->
+      <div class="admin-card mb-4" id="oneOnOneRequestsCard">
+        <div class="d-flex justify-content-between align-items-center mb-3">
+          <h6 class="fw-bold mb-0" style="color:var(--navy)"><i class="fas fa-calendar-check me-2" style="color:#f97316"></i>1:1 Meeting Requests</h6>
+          <button class="btn btn-sm btn-outline-secondary py-0" onclick="loadOneOnOneRequests()"><i class="fas fa-sync-alt"></i></button>
+        </div>
+        <div id="oneOnOneRequestsList"><p class="text-muted small mb-0">Loading…</p></div>
+      </div>
+
+      <!-- Associate Portal Access -->
+      <div class="admin-card mb-4">
+        <div class="d-flex justify-content-between align-items-center mb-3">
+          <h6 class="fw-bold mb-0" style="color:var(--navy)"><i class="fas fa-mobile-alt me-2" style="color:#7c3aed"></i>Associate Portal Access</h6>
+          <button class="btn btn-sm btn-outline-secondary py-0" onclick="loadPendingAccessRequests()"><i class="fas fa-sync-alt"></i></button>
+        </div>
+        <p class="text-muted small mb-3">Grant associates access to their personal mobile portal. They'll receive an email to set their password.</p>
+        <div id="accessRequestsList"><p class="text-muted small mb-0">Loading…</p></div>
+      </div>
+
       <!-- Pending Badge Approvals -->
       <div class="admin-card">
         <div class="d-flex justify-content-between align-items-center mb-3">
@@ -7237,6 +8290,21 @@ body { background:#f4f6fb; font-family:'Segoe UI',sans-serif; margin:0; }
 </div>
 
 <!-- ═══════ MODALS ═══════ -->
+
+<!-- 1:1 Requests Modal (for supervisors) -->
+<div class="modal fade" id="requestsInboxModal" tabindex="-1">
+  <div class="modal-dialog modal-dialog-centered modal-dialog-scrollable">
+    <div class="modal-content">
+      <div class="modal-header border-0 pb-0" style="background:linear-gradient(135deg,#1a2744,#243460);border-radius:0.5rem 0.5rem 0 0;">
+        <h5 class="modal-title fw-bold text-white"><i class="fas fa-calendar-check me-2" style="color:#f97316;"></i>1:1 Meeting Requests</h5>
+        <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body p-3">
+        <div id="requestsInboxList"><p class="text-muted small">Loading…</p></div>
+      </div>
+    </div>
+  </div>
+</div>
 
 <!-- Create User Account -->
 <div class="modal fade" id="newUserModal" tabindex="-1">
@@ -7447,6 +8515,10 @@ body { background:#f4f6fb; font-family:'Segoe UI',sans-serif; margin:0; }
           <option value="left-early-before">Left Early (before half shift) (+1.0 pt)</option>
           <option value="left-early-after">Left Early (after half shift) (+0.5 pt)</option>
           <option value="left-early-sick">Early Out — Sick Time Used (no point)</option>
+          <option value="fmla-pending">Pending FMLA (no point)</option>
+          <option value="fmla-approved">Approved FMLA (no point)</option>
+          <option value="bereavement">Bereavement (no point)</option>
+          <option value="doctors-note">Called Out — Doctor's Note (no point)</option>
         </select>
       </div>
       <div class="mb-3">
@@ -7503,7 +8575,6 @@ body { background:#f4f6fb; font-family:'Segoe UI',sans-serif; margin:0; }
             <option>General</option>
             <option>Coaching</option>
             <option>Recognition</option>
-            <option>Leadership</option>
             <option>Performance</option>
           </select>
         </div>
@@ -7514,8 +8585,17 @@ body { background:#f4f6fb; font-family:'Segoe UI',sans-serif; margin:0; }
         </div>
         <div class="mb-3" id="screenshotSection" style="display:none">
           <label class="form-label small fw-semibold"><i class="fas fa-image me-1" style="color:#7c3aed"></i>Daily Screenshot <span class="text-muted fw-normal">(optional)</span></label>
-          <input type="file" class="form-control" id="noteScreenshot" accept="image/*" onchange="previewScreenshot(this)">
-          <div id="screenshotPreview"></div>
+          <div id="screenshotPasteZone" tabindex="0"
+            style="border:2px dashed #c4b5fd;border-radius:8px;padding:18px;text-align:center;cursor:pointer;background:#faf5ff;color:#7c3aed;font-size:0.85rem;outline:none;transition:border-color .2s"
+            onclick="document.getElementById('noteScreenshot').click()"
+            onkeydown="if(event.key==='Enter')document.getElementById('noteScreenshot').click()"
+            ondragover="event.preventDefault();this.style.borderColor='#7c3aed'"
+            ondragleave="this.style.borderColor='#c4b5fd'"
+            ondrop="event.preventDefault();this.style.borderColor='#c4b5fd';handleScreenshotDrop(event)">
+            <i class="fas fa-paste me-1"></i>Paste screenshot here &nbsp;·&nbsp; <i class="fas fa-folder-open me-1"></i>Click to browse &nbsp;·&nbsp; <i class="fas fa-arrow-down me-1"></i>or drag &amp; drop
+          </div>
+          <input type="file" class="d-none" id="noteScreenshot" accept="image/*" onchange="previewScreenshot(this)">
+          <div id="screenshotPreview" class="mt-2"></div>
         </div>
       </form>
     </div>
@@ -7696,6 +8776,7 @@ body { background:#f4f6fb; font-family:'Segoe UI',sans-serif; margin:0; }
             <option value="sick">Sick</option>
             <option value="personal">Personal</option>
             <option value="fmla">FMLA</option>
+            <option value="bereavement">Bereavement</option>
             <option value="loa">Leave of Absence</option>
             <option value="out">Out (Other)</option>
             <option value="unpaid">Unpaid</option>
@@ -7720,6 +8801,43 @@ body { background:#f4f6fb; font-family:'Segoe UI',sans-serif; margin:0; }
         <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancel</button>
         <button type="button" class="btn text-white fw-semibold" style="background:#0369a1;border:none" onclick="saveTimeOff()">
           <i class="fas fa-save me-1"></i>Save
+        </button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Watch Note Modal -->
+<div class="modal fade" id="watchNoteModal" tabindex="-1">
+  <div class="modal-dialog modal-dialog-centered">
+    <div class="modal-content">
+      <div class="modal-header border-0 pb-0" style="background:linear-gradient(135deg,#92400e 0%,#f59e0b 100%);border-radius:0.5rem 0.5rem 0 0">
+        <h5 class="modal-title fw-bold text-white"><i class="fas fa-lock me-2"></i>Add Private Watch Note</h5>
+        <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body pt-4">
+        <form id="watchNoteForm">
+          <div class="mb-3">
+            <label class="form-label fw-semibold small">Category</label>
+            <select class="form-select" id="watchNoteCategory">
+              <option value="General">General</option>
+              <option value="Attendance">Attendance</option>
+              <option value="Behavior">Behavior</option>
+              <option value="Performance">Performance</option>
+              <option value="Safety">Safety</option>
+              <option value="Other">Other</option>
+            </select>
+          </div>
+          <div class="mb-1">
+            <label class="form-label fw-semibold small">Note <span class="text-danger">*</span></label>
+            <textarea class="form-control" id="watchNoteText" rows="4" placeholder="Enter private observation…" style="resize:vertical"></textarea>
+          </div>
+        </form>
+      </div>
+      <div class="modal-footer border-0 pt-0">
+        <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancel</button>
+        <button type="button" class="btn text-white fw-semibold" id="saveWatchNoteBtn" style="background:#92400e;border:none" onclick="saveWatchNote()">
+          <i class="fas fa-save me-1"></i>Save Note
         </button>
       </div>
     </div>
