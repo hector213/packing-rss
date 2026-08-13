@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>LAS1 Engagement Tracker</title>
+<title>Operational Health Tracker</title>
 <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
 <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css" rel="stylesheet">
@@ -303,7 +303,15 @@ async function autoExpirePoints() {
 let currentUser = null;
 let currentUserRole = 'viewer';
 let currentUserAssocId = null; // associate record ID matching the logged-in user
+
+// Role hierarchy helper — viewer < lead < supervisor < om < admin
+const ROLE_TIERS = { viewer: 0, lead: 1, supervisor: 2, om: 3, admin: 4 };
+function roleAtLeast(minRole) {
+  return (ROLE_TIERS[currentUserRole] ?? 0) >= (ROLE_TIERS[minRole] ?? 99);
+}
 let currentAssociateId = null;
+let _origAssocStatus = '';
+let _pendingAssocSave = null;
 window._getCurrentAssocId = () => currentAssociateId;
 let activeListeners = {};
 let allAssociates = [];
@@ -357,7 +365,7 @@ onAuthStateChanged(auth, async (user) => {
         currentUserAssocId = _matchDoc ? _matchDoc.id : null;
       }
     }
-    if (currentUserRole === 'admin') document.getElementById('navAdmin').classList.remove('d-none');
+    if (roleAtLeast('om')) document.getElementById('navAdmin').classList.remove('d-none');
     if (currentUserRole !== 'viewer') document.getElementById('addAssocBtn').classList.remove('d-none');
     applyTabVisibility();
     restoreLastView();
@@ -1373,7 +1381,7 @@ window.openProfile = async (id) => {
   flagEl.innerHTML = (a.flag && a.flag !== '')
     ? `<span class="badge ${FLAGS[a.flag].cls}">${FLAGS[a.flag].label}</span>` : '';
 
-  const canEdit = currentUserRole === 'admin' || currentUserRole === 'supervisor' || currentUserRole === 'lead';
+  const canEdit = roleAtLeast('lead');
   document.getElementById('profileEditBtn').classList.toggle('d-none', !canEdit);
 
   document.getElementById('profileEditBtn').onclick = () => openEditAssociate(id, a);
@@ -1383,6 +1391,9 @@ window.openProfile = async (id) => {
   const canSeeBoard = isLeadership && (currentUserRole === 'admin' || id === currentUserAssocId);
   const boardBtn = document.getElementById('profileBoardBtn');
   boardBtn.classList.toggle('d-none', !canSeeBoard);
+  // Corrective button — show for supervisors and above
+  const correctiveBtn = document.getElementById('profileCorrectiveBtn');
+  if (correctiveBtn) correctiveBtn.classList.toggle('d-none', !roleAtLeast('supervisor'));
   if (isLeadership) {
     getDocs(collection(db, 'supervisorTasks', id, 'board')).then(snap => {
       const countEl = document.getElementById('kb-count-profile');
@@ -1407,12 +1418,15 @@ window.openProfile = async (id) => {
 
   // Reset watch notes panel state
   watchNotesOpen = false;
+  goalsOpen = false;
   document.getElementById('watchNotesBody').classList.add('d-none');
   document.getElementById('watchChevron').classList.remove('open');
   document.getElementById('watchAddBtn').style.display = 'none';
 
   // Reset 1:1 panel state
   oneOnOneOpen = false;
+  const oo1Assigned = document.getElementById('oneOnOneAssigned');
+  if (oo1Assigned) { oo1Assigned.innerHTML = ''; oo1Assigned.style.display = 'none'; }
   const oo1Body = document.getElementById('oneOnOneBody');
   const oo1Chev = document.getElementById('oneOnOneChevron');
   const oo1Btn  = document.getElementById('oneOnOneSchedBtn');
@@ -1425,6 +1439,7 @@ window.openProfile = async (id) => {
   listenCerts(id);
   listenCreds(id);
   listenWatchNotes(id);
+  listenGoals(id);
   listenAttendance(id);
   listenWarnings(id);
   listenOneOnOnes(id);
@@ -1516,7 +1531,7 @@ window.exportToClaude = async () => {
     } else { out += `No shift snapshots.\n`; }
   } catch(e) { out += `(Snapshots unavailable)\n`; }
 
-  if (currentUserRole === 'admin' || currentUserRole === 'supervisor') {
+  if (roleAtLeast('om')) {
     out += `\n=== PRIVATE WATCH NOTES ===\n`;
     try {
       const wSnap = await getDocs(collection(db, 'watchnotes', currentAssociateId, 'entries'));
@@ -1630,7 +1645,7 @@ function renderNotes(notes) {
         </div>
         <div class="d-flex align-items-center gap-2">
           <span class="text-muted small">${formatDateTime(n.createdAt)}</span>
-          ${(currentUserRole === 'admin' || currentUserRole === 'supervisor')
+          ${roleAtLeast('admin')
             ? `<button class="btn btn-sm btn-link text-danger p-0" onclick="deleteNote('${n.id}')"><i class="fas fa-times"></i></button>` : ''}
         </div>
       </div>
@@ -1814,6 +1829,7 @@ window.saveNote = async () => {
   }
 };
 window.deleteNote = async (noteId) => {
+  if (!roleAtLeast('admin')) return;
   if (!confirm('Delete this note?')) return;
   const _basePoints = Number(allAssociates.find(a => a.id === currentAssociateId)?.points) || 0;
   const noteSnap = await getDoc(doc(db, 'notes', currentAssociateId, 'entries', noteId));
@@ -1865,7 +1881,7 @@ function renderCreds(creds) {
     <div class="cred-card">
       <div class="d-flex justify-content-between align-items-start">
         <div class="cred-system"><i class="fas fa-desktop me-1" style="color:#6366f1"></i>${escapeHtml(c.system)}</div>
-        <button class="btn btn-sm btn-link text-danger p-0" style="font-size:0.75rem" onclick="deleteCred('${c.id}')"><i class="fas fa-trash-alt"></i></button>
+        ${roleAtLeast('admin') ? `<button class="btn btn-sm btn-link text-danger p-0" style="font-size:0.75rem" onclick="deleteCred('${c.id}')"><i class="fas fa-trash-alt"></i></button>` : ''}
       </div>
       <div class="cred-row"><span class="cred-label">Username</span><span>${escapeHtml(c.username)}</span>
         <button class="btn btn-sm btn-link p-0 ms-1" style="font-size:0.75rem;color:#6366f1" onclick="copyToClipboard('${escapeHtml(c.username)}',this)" title="Copy"><i class="fas fa-copy"></i></button>
@@ -1879,8 +1895,8 @@ function renderCreds(creds) {
       <div class="cred-meta">Added by ${escapeHtml(c.addedBy || '—')} · ${formatDate(c.createdAt)}</div>
     </div>`).join('');
 
-  // Only admins can delete — update delete buttons after render
-  if (currentUserRole !== 'admin') {
+  // OM and Admin can delete credentials
+  if (!roleAtLeast('om')) {
     container.querySelectorAll('[onclick^="deleteCred"]').forEach(b => b.remove());
   }
 }
@@ -1945,6 +1961,7 @@ window.saveCred = async () => {
 };
 
 window.deleteCred = async (credId) => {
+  if (!roleAtLeast('admin')) return;
   if (!confirm('Delete this credential entry?')) return;
   await deleteDoc(doc(db, 'credentials', currentAssociateId, 'entries', credId));
   listenCreds(currentAssociateId);
@@ -1955,7 +1972,7 @@ let lastWatchNotes = [];
 let watchNotesOpen = false;
 
 function listenWatchNotes(associateId) {
-  const canSee = currentUserRole === 'admin' || currentUserRole === 'supervisor';
+  const canSee = roleAtLeast('om');
   const section = document.getElementById('watchSection');
   if (!canSee) { section.classList.add('d-none'); return; }
   section.classList.remove('d-none');
@@ -1972,7 +1989,7 @@ function listenWatchNotes(associateId) {
 
 function renderWatchNotes(notes) {
   const container = document.getElementById('watchNotesContainer');
-  const canEdit = currentUserRole === 'admin' || currentUserRole === 'supervisor';
+  const canEdit = roleAtLeast('om');
   if (!notes.length) {
     container.innerHTML = `<div class="text-center text-muted py-3 small"><i class="fas fa-eye-slash me-1"></i>No watch notes yet.</div>`;
     return;
@@ -1983,7 +2000,7 @@ function renderWatchNotes(notes) {
       <div class="watch-note-text">${escapeHtml(n.text)}</div>
       <div class="d-flex justify-content-between align-items-center">
         <div class="watch-note-meta"><i class="fas fa-user-shield me-1"></i>${escapeHtml(n.author || '—')} · ${formatDate(n.createdAt)}</div>
-        ${canEdit ? `<button class="btn btn-sm btn-link text-danger p-0" style="font-size:0.75rem" onclick="deleteWatchNote('${n.id}')"><i class="fas fa-trash-alt"></i></button>` : ''}
+        ${roleAtLeast('admin') ? `<button class="btn btn-sm btn-link text-danger p-0" style="font-size:0.75rem" onclick="deleteWatchNote('${n.id}')"><i class="fas fa-trash-alt"></i></button>` : ''}
       </div>
     </div>`).join('');
 }
@@ -2025,9 +2042,369 @@ window.saveWatchNote = async () => {
 };
 
 window.deleteWatchNote = async (noteId) => {
+  if (!roleAtLeast('admin')) return;
   if (!confirm('Delete this watch note?')) return;
   await deleteDoc(doc(db, 'watchnotes', currentAssociateId, 'entries', noteId));
 };
+
+// ─── Associate Goals ─────────────────────────────────────────────────────
+let lastGoals = [];
+let goalsOpen = false;
+
+function listenGoals(assocId) {
+  getDocs(collection(db, 'goals', assocId, 'entries')).then(snap => {
+    const goals = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+    goals.sort((a, b) => {
+      const ord = { Active: 0, 'On Hold': 1, Completed: 2 };
+      const diff = (ord[a.status] ?? 1) - (ord[b.status] ?? 1);
+      if (diff !== 0) return diff;
+      return (a.dueDate || '') < (b.dueDate || '') ? -1 : 1;
+    });
+    lastGoals = goals;
+    const badge = document.getElementById('goalCountBadge');
+    if (badge) badge.textContent = goals.filter(g => g.status === 'Active').length;
+    if (goalsOpen) renderGoals(goals);
+  }).catch(() => {});
+}
+
+function renderProgressNotes(notes, goalId, canManage) {
+  if (!notes.length) return '<div class="text-muted py-1" style="font-size:0.75rem">No progress notes yet.</div>';
+  return notes.slice().reverse().map(n => {
+    const d = n.date ? new Date(n.date) : null;
+    const dateStr = d
+      ? d.toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'}) + ' ' + d.toLocaleTimeString('en-US',{hour:'numeric',minute:'2-digit'})
+      : '—';
+    return '<div class="progress-note-entry">' +
+      '<div class="d-flex justify-content-between align-items-center">' +
+        '<div class="progress-note-date">' + dateStr + ' · ' + escapeHtml(n.addedBy||'—') + '</div>' +
+        (roleAtLeast('admin') ? '<button class="btn btn-link p-0 text-danger" style="font-size:0.65rem;line-height:1" onclick="deleteProgressNote(\'' + goalId + '\',\'' + n.id + '\')">remove</button>' : '') +
+      '</div>' +
+      '<div class="progress-note-text">' + escapeHtml(n.text) + '</div>' +
+    '</div>';
+  }).join('');
+}
+
+function renderGoals(goals) {
+  const container = document.getElementById('goalsContainer');
+  if (!container) return;
+  const canManage = roleAtLeast('supervisor');
+  if (!goals.length) {
+    container.innerHTML = '<div class="text-center text-muted py-3 small"><i class="fas fa-bullseye me-1"></i>No goals set yet.</div>';
+    return;
+  }
+  const statusColor = { Active: '#2563eb', Completed: '#059669', 'On Hold': '#d97706' };
+  const catIcon = { '30-Day': 'fa-calendar-day', '60-Day': 'fa-calendar-week', '90-Day': 'fa-calendar', 'Long-Term': 'fa-star', 'General': 'fa-bullseye' };
+  container.innerHTML = goals.map(g => {
+    const color = statusColor[g.status] || '#6b7280';
+    const icon  = catIcon[g.category] || 'fa-bullseye';
+    const overdue = g.dueDate && g.status === 'Active' && g.dueDate < new Date().toISOString().slice(0,10);
+    const pNotes = g.progressNotes || [];
+    const notesHtml = renderProgressNotes(pNotes, g.id, canManage);
+    const addNoteForm = canManage
+      ? '<div class="d-flex gap-2 mt-2">' +
+          '<textarea class="form-control form-control-sm" id="progressInput-' + g.id + '" rows="1" placeholder="Add a progress note…" style="font-size:0.8rem;resize:none"></textarea>' +
+          '<button class="btn btn-sm text-white fw-semibold" style="background:#2563eb;border:none;white-space:nowrap;font-size:0.75rem" onclick="addProgressNote(\'' + g.id + '\')">' +
+            '<i class="fas fa-plus me-1"></i>Add' +
+          '</button>' +
+        '</div>'
+      : '';
+    const dueLine = g.dueDate
+      ? '<div class="goal-meta mt-1"><i class="fas fa-calendar-day me-1"></i>Due ' + new Date(g.dueDate+'T00:00:00').toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'}) + '</div>'
+      : '';
+    const notesLine = g.notes
+      ? '<div class="small text-muted mt-1" style="white-space:pre-wrap;font-size:0.8rem">' + escapeHtml(g.notes) + '</div>'
+      : '';
+    const overdueTag = overdue
+      ? '<span class="goal-status-badge" style="background:#fee2e2;color:#dc2626"><i class="fas fa-exclamation-circle me-1"></i>Overdue</span>'
+      : '';
+    const statusDropdown = canManage
+      ? '<div class="d-flex align-items-center gap-1">' +
+          '<select class="form-select form-select-sm py-0 px-1" style="font-size:0.72rem;width:auto;height:24px" onchange="updateGoalStatus(\'' + g.id + '\',this.value)">' +
+            '<option ' + (g.status==='Active'?'selected':'') + '>Active</option>' +
+            '<option ' + (g.status==='Completed'?'selected':'') + '>Completed</option>' +
+            '<option ' + (g.status==='On Hold'?'selected':'') + '>On Hold</option>' +
+          '</select>' +
+          (roleAtLeast('admin') ? '<button class="btn btn-sm btn-link text-danger p-0" style="font-size:0.75rem" onclick="deleteGoal(\'' + g.id + '\')"><i class="fas fa-trash-alt"></i></button>' : '') +
+        '</div>'
+      : '';
+    return '<div class="goal-card" style="border-left:4px solid ' + color + '">' +
+      '<div class="d-flex justify-content-between align-items-start mb-1 flex-wrap gap-1">' +
+        '<div class="d-flex align-items-center gap-2 flex-wrap">' +
+          '<i class="fas ' + icon + '" style="color:' + color + ';font-size:0.8rem"></i>' +
+          '<span class="goal-category-badge">' + escapeHtml(g.category||'General') + '</span>' +
+          '<span class="goal-status-badge" style="background:' + color + '22;color:' + color + '">' + g.status + '</span>' +
+          overdueTag +
+        '</div>' +
+        statusDropdown +
+      '</div>' +
+      '<div class="goal-title mt-1">' + escapeHtml(g.title) + '</div>' +
+      dueLine +
+      notesLine +
+      '<div class="goal-meta mt-1"><i class="fas fa-user me-1"></i>Set by ' + escapeHtml(g.createdBy||'—') + ' · ' + formatDate(g.createdAt) + '</div>' +
+      '<div class="mt-2 pt-1" style="border-top:1px solid #e2e8f0">' +
+        '<button class="btn btn-link p-0" style="font-size:0.72rem;color:#64748b;text-decoration:none" onclick="toggleGoalProgress(\'' + g.id + '\')">' +
+          '<i class="fas fa-history me-1"></i>' + pNotes.length + ' progress note' + (pNotes.length !== 1 ? 's' : '') +
+        '</button>' +
+      '</div>' +
+      '<div id="goalProgress-' + g.id + '" class="d-none goal-progress-area">' +
+        '<div id="goalProgressLog-' + g.id + '">' + notesHtml + '</div>' +
+        addNoteForm +
+      '</div>' +
+    '</div>';
+  }).join('');
+}
+
+window.toggleGoalProgress = (goalId) => {
+  const area = document.getElementById('goalProgress-' + goalId);
+  if (area) area.classList.toggle('d-none');
+};
+
+window.addProgressNote = async (goalId) => {
+  const input = document.getElementById('progressInput-' + goalId);
+  const text = input ? input.value.trim() : '';
+  if (!text) return;
+  const note = {
+    id: Date.now().toString(),
+    text,
+    date: new Date().toISOString(),
+    addedBy: currentUser?.email || '—'
+  };
+  try {
+    const goalRef = doc(db, 'goals', currentAssociateId, 'entries', goalId);
+    const snap = await getDoc(goalRef);
+    if (!snap.exists()) return;
+    const updated = [...(snap.data().progressNotes || []), note];
+    await updateDoc(goalRef, { progressNotes: updated });
+    const g = lastGoals.find(x => x.id === goalId);
+    if (g) g.progressNotes = updated;
+    input.value = '';
+    const logEl = document.getElementById('goalProgressLog-' + goalId);
+    const btn = input.nextElementSibling;
+    const canManage = roleAtLeast('supervisor');
+    if (logEl) logEl.innerHTML = renderProgressNotes(updated, goalId, canManage);
+    // update toggle button count
+    const toggleBtn = document.querySelector('[onclick="toggleGoalProgress(\'' + goalId + '\')"]');
+    if (toggleBtn) toggleBtn.innerHTML = '<i class="fas fa-history me-1"></i>' + updated.length + ' progress note' + (updated.length !== 1 ? 's' : '');
+  } catch(e) { alert('Could not save note — ' + e.message); }
+};
+
+window.deleteProgressNote = async (goalId, noteId) => {
+  if (!roleAtLeast('admin')) return;
+  if (!confirm('Remove this progress note?')) return;
+  try {
+    const goalRef = doc(db, 'goals', currentAssociateId, 'entries', goalId);
+    const snap = await getDoc(goalRef);
+    if (!snap.exists()) return;
+    const updated = (snap.data().progressNotes || []).filter(n => n.id !== noteId);
+    await updateDoc(goalRef, { progressNotes: updated });
+    const g = lastGoals.find(x => x.id === goalId);
+    if (g) g.progressNotes = updated;
+    const logEl = document.getElementById('goalProgressLog-' + goalId);
+    const canManage = roleAtLeast('supervisor');
+    if (logEl) logEl.innerHTML = renderProgressNotes(updated, goalId, canManage);
+    const toggleBtn = document.querySelector('[onclick="toggleGoalProgress(\'' + goalId + '\')"]');
+    if (toggleBtn) toggleBtn.innerHTML = '<i class="fas fa-history me-1"></i>' + updated.length + ' progress note' + (updated.length !== 1 ? 's' : '');
+  } catch(e) { alert('Could not remove note — ' + e.message); }
+};
+
+window.toggleGoalsPanel = () => {
+  goalsOpen = !goalsOpen;
+  document.getElementById('goalsBody').classList.toggle('d-none', !goalsOpen);
+  document.getElementById('goalsChevron').classList.toggle('open', goalsOpen);
+  const btn = document.getElementById('goalsAddBtn');
+  if (btn) btn.style.display = goalsOpen && roleAtLeast('supervisor') ? 'inline-flex' : 'none';
+  if (goalsOpen) renderGoals(lastGoals);
+};
+
+window.openAddGoalModal = () => {
+  document.getElementById('goalForm').reset();
+  document.getElementById('goalEditId').value = '';
+  bootstrap.Modal.getOrCreateInstance(document.getElementById('goalModal')).show();
+};
+
+window.saveGoal = async () => {
+  const title = document.getElementById('goalTitle').value.trim();
+  if (!title) { alert('Please enter a goal description.'); return; }
+  const btn = document.getElementById('saveGoalBtn');
+  btn.disabled = true;
+  const data = {
+    title,
+    category: document.getElementById('goalCategory').value,
+    dueDate:  document.getElementById('goalDueDate').value || null,
+    notes:    document.getElementById('goalNotes').value.trim(),
+    status:   'Active',
+    progressNotes: [],
+    createdAt: new Date().toISOString(),
+    createdBy: currentUser?.email || '—'
+  };
+  try {
+    await addDoc(collection(db, 'goals', currentAssociateId, 'entries'), data);
+    bootstrap.Modal.getInstance(document.getElementById('goalModal')).hide();
+    listenGoals(currentAssociateId);
+  } catch(e) { alert('Could not save — ' + e.message); }
+  finally    { btn.disabled = false; }
+};
+
+window.updateGoalStatus = async (goalId, status) => {
+  await updateDoc(doc(db, 'goals', currentAssociateId, 'entries', goalId), { status });
+  listenGoals(currentAssociateId);
+};
+
+window.deleteGoal = async (goalId) => {
+  if (!roleAtLeast('admin')) return;
+  if (!confirm('Delete this goal?')) return;
+  await deleteDoc(doc(db, 'goals', currentAssociateId, 'entries', goalId));
+  listenGoals(currentAssociateId);
+};
+
+// ─── Turnover / Exit Tracker ──────────────────────────────────────────────
+window._turnoverPeriod = 12;
+
+window.confirmExit = async () => {
+  if (!_pendingAssocSave) return;
+  const { id, data } = _pendingAssocSave;
+  const btn = document.getElementById('confirmExitBtn');
+  btn.disabled = true;
+  const exitData = {
+    exitReason:  document.getElementById('exitReason').value,
+    exitLastDay: document.getElementById('exitLastDay').value || null,
+    exitNotes:   document.getElementById('exitNotes').value.trim(),
+    separatedAt: new Date().toISOString()
+  };
+  try {
+    await updateDoc(doc(db, 'associates', id), { ...data, ...exitData });
+    bootstrap.Modal.getInstance(document.getElementById('exitModal')).hide();
+    _pendingAssocSave = null;
+    const fs = document.getElementById('filterStatus');
+    if (fs && fs.value !== 'active') { fs.value = 'active'; renderDashboard(); }
+  } catch(e) { alert('Could not save — ' + e.message); }
+  finally    { btn.disabled = false; }
+};
+
+window.openEditSeparation = (assocId) => {
+  const a = allAssociates.find(x => x.id === assocId);
+  if (!a) return;
+  document.getElementById('editSepAssocId').value = assocId;
+  document.getElementById('editSepName').textContent = a.name;
+  document.getElementById('editSepReason').value = a.exitReason || (a.status === 'resigned' ? 'Resigned' : 'Terminated');
+  document.getElementById('editSepLastDay').value = a.exitLastDay || '';
+  document.getElementById('editSepNotes').value = a.exitNotes || '';
+  bootstrap.Modal.getOrCreateInstance(document.getElementById('editSeparationModal')).show();
+};
+
+window.saveEditSeparation = async () => {
+  const assocId = document.getElementById('editSepAssocId').value;
+  const btn = document.getElementById('saveEditSepBtn');
+  btn.disabled = true;
+  const data = {
+    exitReason:  document.getElementById('editSepReason').value,
+    exitLastDay: document.getElementById('editSepLastDay').value || null,
+    exitNotes:   document.getElementById('editSepNotes').value.trim()
+  };
+  try {
+    await updateDoc(doc(db, 'associates', assocId), data);
+    const a = allAssociates.find(x => x.id === assocId);
+    if (a) Object.assign(a, data);
+    bootstrap.Modal.getInstance(document.getElementById('editSeparationModal')).hide();
+    renderTurnoverView();
+  } catch(e) { alert('Could not save — ' + e.message); }
+  finally    { btn.disabled = false; }
+};
+
+window.loadTurnover = () => {
+  showView('turnover');
+  renderTurnoverView();
+};
+window.renderTurnoverView = renderTurnoverView;
+
+function renderTurnoverView() {
+  const period = window._turnoverPeriod || 12;
+  const cutoff = new Date();
+  cutoff.setMonth(cutoff.getMonth() - period);
+  const cutoffStr = cutoff.toISOString().slice(0,10);
+
+  const separated = allAssociates.filter(a => {
+    const isSep = a.status === 'resigned' || a.status === 'terminated';
+    const dateKey = (a.separatedAt||'').slice(0,10) || a.exitLastDay || (a.updatedAt||'').slice(0,10) || '';
+    return isSep && dateKey >= cutoffStr;
+  });
+
+  const resigned   = separated.filter(a => (a.exitReason||a.status) === 'Resigned'   || a.status === 'resigned');
+  const terminated = separated.filter(a => (a.exitReason||a.status) === 'Terminated' || a.status === 'terminated');
+
+  function tenureMonths(a) {
+    const start = a.hireDate ? new Date(a.hireDate+'T00:00:00') : null;
+    const end   = a.exitLastDay ? new Date(a.exitLastDay+'T00:00:00') : (a.separatedAt ? new Date(a.separatedAt) : new Date());
+    if (!start || isNaN(start)) return null;
+    return Math.max(0, Math.round((end - start)/(1000*60*60*24*30.44)));
+  }
+
+  const tenures = separated.map(tenureMonths).filter(t => t !== null);
+  const avgTenure = tenures.length ? Math.round(tenures.reduce((s,t)=>s+t,0)/tenures.length) : null;
+
+  const container = document.getElementById('turnoverContent');
+  if (!container) return;
+
+  container.innerHTML = `
+    <div class="row g-3 mb-4">
+      <div class="col-6 col-md-3">
+        <div class="admin-card text-center py-3">
+          <div style="font-size:2rem;font-weight:800;color:var(--navy)">${separated.length}</div>
+          <div class="small text-muted fw-semibold">Total Separated</div>
+        </div>
+      </div>
+      <div class="col-6 col-md-3">
+        <div class="admin-card text-center py-3">
+          <div style="font-size:2rem;font-weight:800;color:#2563eb">${resigned.length}</div>
+          <div class="small fw-semibold" style="color:#2563eb">Resigned</div>
+        </div>
+      </div>
+      <div class="col-6 col-md-3">
+        <div class="admin-card text-center py-3">
+          <div style="font-size:2rem;font-weight:800;color:#dc2626">${terminated.length}</div>
+          <div class="small fw-semibold" style="color:#dc2626">Terminated</div>
+        </div>
+      </div>
+      <div class="col-6 col-md-3">
+        <div class="admin-card text-center py-3">
+          <div style="font-size:2rem;font-weight:800;color:#d97706">${avgTenure !== null ? avgTenure + ' mo' : '—'}</div>
+          <div class="small text-muted fw-semibold">Avg Tenure</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="admin-card">
+      <h6 class="fw-bold mb-3" style="color:var(--navy)"><i class="fas fa-list me-2" style="color:var(--orange)"></i>Separation Log</h6>
+      ${!separated.length ? `<p class="text-muted small mb-0 text-center py-3">No separations recorded in the last ${period} months.</p>` : `
+      <div class="table-responsive">
+        <table class="table table-sm small mb-0">
+          <thead class="table-light"><tr><th>Name</th><th>Reason</th><th>Last Day</th><th>Dept</th><th>Shift</th><th>Tenure</th><th>Notes</th><th></th></tr></thead>
+          <tbody>
+            ${[...separated].sort((a,b)=>{
+              const da = (a.separatedAt||a.updatedAt||'');
+              const db2= (b.separatedAt||b.updatedAt||'');
+              return da < db2 ? 1 : -1;
+            }).map(a => {
+              const t = tenureMonths(a);
+              const reason = a.exitReason || (a.status === 'resigned' ? 'Resigned' : 'Terminated');
+              const isRes  = reason === 'Resigned';
+              const lastDay = a.exitLastDay ? new Date(a.exitLastDay+'T00:00:00').toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'}) : '—';
+              return '<tr>' +
+                '<td class="fw-semibold">' + escapeHtml(a.name) + '</td>' +
+                '<td><span class="badge" style="background:' + (isRes?'#dbeafe':'#fee2e2') + ';color:' + (isRes?'#1d4ed8':'#b91c1c') + '">' + escapeHtml(reason) + '</span></td>' +
+                '<td>' + lastDay + '</td>' +
+                '<td class="text-muted">' + escapeHtml(a.department||'—') + '</td>' +
+                '<td class="text-muted">' + escapeHtml(a.shift||'—') + '</td>' +
+                '<td class="text-muted">' + (t !== null ? t+' mo' : '—') + '</td>' +
+                '<td class="text-muted" style="max-width:180px;white-space:normal">' + escapeHtml(a.exitNotes||'—') + '</td>' +
+                (roleAtLeast('admin') ? '<td><button class="btn btn-sm btn-outline-secondary py-0 px-2" style="font-size:0.72rem" onclick="openEditSeparation(\'' + a.id + '\')"><i class="fas fa-pencil-alt me-1"></i>Edit</button></td>' : '<td></td>') +
+                '</tr>';
+            }).join('')}
+          </tbody>
+        </table>
+      </div>`}
+    </div>`;
+}
 
 // ─── Badges ───────────────────────────────────────────────────────────
 let lastBadges = [];
@@ -2045,7 +2422,7 @@ let badgesExpanded = false;
 
 function renderBadges(badges) {
   const container   = document.getElementById('badgesContainer');
-  const canNominate = currentUserRole === 'admin' || currentUserRole === 'supervisor' || currentUserRole === 'lead';
+  const canNominate = roleAtLeast('lead');
 
   // Group approved by type (array), collect pending by type
   // Support both old format (approved:true, badge:key) and new format (status:'approved', badge:label)
@@ -2104,7 +2481,7 @@ function renderBadges(badges) {
         const cardClass = isElite ? 'badge-card-elite' : 'badge-card-active';
         const tooltip   = [`Awarded by ${b.approvedBy||'?'} on ${formatDate(b.approvedAt)}`, b.reason ? `\n"${b.reason}"` : ''].join('');
         return `<div class="badge-card ${cardClass}" title="${escapeHtml(tooltip)}">
-          ${currentUserRole === 'admin' ? `<button class="badge-remove-btn" onclick="removeBadge('${b.id}')" title="Remove">×</button>` : ''}
+          ${roleAtLeast('admin') ? `<button class="badge-remove-btn" onclick="removeBadge('${b.id}')" title="Remove">×</button>` : ''}
           <div class="badge-emoji">${def.emoji}</div>
           <div class="badge-label">${escapeHtml(def.label)}</div>
           <div class="badge-date">${formatDate(b.approvedAt)}</div>
@@ -2216,6 +2593,7 @@ window.rejectBadge = async (associateId, badgeId) => {
   listenBadges(associateId); // refresh badge display immediately
 };
 window.removeBadge = async (badgeId) => {
+  if (!roleAtLeast('admin')) return;
   if (!confirm('Remove this badge?')) return;
   const badgeSnap = await getDoc(doc(db, 'badges', currentAssociateId, 'entries', badgeId));
   if (badgeSnap.exists()) {
@@ -2427,6 +2805,7 @@ window.openAddAssociate = () => {
   document.getElementById('assocId').value = '';
   document.getElementById('deleteAssocBtn').classList.add('d-none');
   populateReportsTo('');
+  _origAssocStatus = 'new';
   bootstrap.Modal.getOrCreateInstance(document.getElementById('assocModal')).show();
 };
 window.openEditAssociate = (id, data) => {
@@ -2436,7 +2815,7 @@ window.openEditAssociate = (id, data) => {
   const delBtn = document.getElementById('deleteAssocBtn');
   delBtn.disabled = false;
   delBtn.innerHTML = '<i class="fas fa-trash-alt me-1"></i>Delete';
-  if (currentUserRole === 'admin') delBtn.classList.remove('d-none');
+  if (roleAtLeast('admin')) delBtn.classList.remove('d-none');
   else delBtn.classList.add('d-none');
   ['Name','EmployeeId','Role','Dept'].forEach(f => {
     const key = f === 'EmployeeId' ? 'employeeId' : f === 'Dept' ? 'department' : f.toLowerCase();
@@ -2450,6 +2829,7 @@ window.openEditAssociate = (id, data) => {
   document.getElementById('assocOpsManager').value = data.opsManager || '';
   document.getElementById('assocEmploymentType').value = data.employmentType || 'direct-hire';
   populateReportsTo(data.reportsTo || '');
+  _origAssocStatus = data.status || 'active';
   bootstrap.Modal.getOrCreateInstance(document.getElementById('assocModal')).show();
 };
 window.saveAssociate = async () => {
@@ -2470,6 +2850,19 @@ window.saveAssociate = async () => {
     updatedAt:  new Date().toISOString(), updatedBy: currentUser?.email
   };
   if (!data.name) { alert('Name is required'); return; }
+  // Intercept to capture exit details when status changes to resigned/terminated
+  const isNewExit = id && (data.status === 'resigned' || data.status === 'terminated')
+                  && _origAssocStatus !== 'resigned' && _origAssocStatus !== 'terminated'
+                  && _origAssocStatus !== 'new';
+  if (isNewExit) {
+    _pendingAssocSave = { id, data };
+    document.getElementById('exitReason').value = data.status === 'resigned' ? 'Resigned' : 'Terminated';
+    document.getElementById('exitLastDay').value = new Date().toISOString().slice(0,10);
+    document.getElementById('exitNotes').value = '';
+    bootstrap.Modal.getInstance(document.getElementById('assocModal')).hide();
+    bootstrap.Modal.getOrCreateInstance(document.getElementById('exitModal')).show();
+    return;
+  }
   if (id) {
     await updateDoc(doc(db, 'associates', id), data);
   } else {
@@ -2486,6 +2879,7 @@ window.saveAssociate = async () => {
 
 // ─── Delete Associate (admin only) ────────────────────────────────────
 window.deleteAssociate = async () => {
+  if (!roleAtLeast('admin')) return;
   const id   = document.getElementById('assocId').value;
   const name = document.getElementById('assocName').value.trim() || 'this associate';
   if (!id) return;
@@ -2637,7 +3031,7 @@ window.exportProfilePDF = async () => {
     const ptsStr = (e.points || 0) === 0 ? '<span class="att-pts-zero">0 pts</span>' : `<span class="att-pts-pos">+${e.points} pts</span>`;
     return `<div class="att-row"><span>${new Date(e.date).toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'})} — ${info.label}${e.note ? ' <em style="color:#9ca3af">(' + e.note + ')</em>' : ''}</span>${ptsStr}</div>`;
   }).join('') : '<div style="color:#9ca3af;font-size:0.85rem">No attendance events recorded.</div>'}
-  <div style="margin-top:32px;font-size:0.72rem;color:#9ca3af">Exported ${new Date().toLocaleString()} · LAS1 Engagement Tracker</div>
+  <div style="margin-top:32px;font-size:0.72rem;color:#9ca3af">Exported ${new Date().toLocaleString()} · Operational Health Tracker</div>
   </body></html>`;
 
   const win = window.open('', '_blank');
@@ -2934,9 +3328,9 @@ window.updateAttFilterColor = async () => {
     const warnings = !wSnap.empty ? Object.entries(wSnap.data()).map(([id,w]) => ({id,...w})).sort((a,b) => new Date(a.issuedAt)-new Date(b.issuedAt)) : [];
     const wContainer = document.getElementById('attSummWarnings');
     if (!wContainer) return;
-    const canLog = currentUserRole === 'admin' || currentUserRole === 'supervisor' || currentUserRole === 'lead';
+    const canLog = roleAtLeast('lead');
     const assocId = sel.value;
-    const canDelete = currentUserRole === 'admin' || currentUserRole === 'supervisor';
+    const canDelete = roleAtLeast('admin');
     wContainer.innerHTML = WARNING_TIERS.map(tier => {
       const issued  = warnings.filter(w => w.type === tier.key).sort((a,b) => new Date(b.issuedAt)-new Date(a.issuedAt));
       const isActive = pts >= tier.threshold;
@@ -3025,7 +3419,7 @@ function updateAttScoreDisplay() {
 function renderAttendanceLog() {
   const container = document.getElementById('attendanceLog');
   if (!container) return;
-  const canEdit = currentUserRole === 'admin' || currentUserRole === 'supervisor' || currentUserRole === 'lead';
+  const canEdit = roleAtLeast('lead');
   if (!lastAttendance.length) {
     container.innerHTML = `<div class="text-center text-muted py-4 small"><i class="fas fa-calendar-check fa-2x mb-2 d-block opacity-25"></i>No attendance events logged.</div>`;
     return;
@@ -3093,7 +3487,7 @@ function renderWarnings(warnings) {
   const container = document.getElementById('warningsContainer');
   if (!container) return;
   const pts     = lastAttendance.reduce((s, e) => s + (e.points || 0), 0);
-  const canEdit = currentUserRole === 'admin' || currentUserRole === 'supervisor' || currentUserRole === 'lead';
+  const canEdit = roleAtLeast('lead');
 
   container.innerHTML = WARNING_TIERS.map(tier => {
     const issued = warnings.filter(w => w.type === tier.key).sort((a,b) => new Date(b.issuedAt)-new Date(a.issuedAt));
@@ -3119,7 +3513,7 @@ function renderWarnings(warnings) {
           <span style="color:#374151">Issued ${new Date(w.issuedAt).toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'})} at ${new Date(w.issuedAt).toLocaleTimeString('en-US',{hour:'numeric',minute:'2-digit'})}</span>
           <span class="text-muted">· by ${escapeHtml(w.issuedBy || '—')}</span>
           ${w.notes ? `<span class="text-muted fst-italic">· "${escapeHtml(w.notes)}"</span>` : ''}
-          ${(currentUserRole === 'admin' || currentUserRole === 'supervisor') ? `<button class="btn btn-link text-danger p-0 ms-auto" style="font-size:0.7rem" onclick="deleteWarning('${w.id}')"><i class="fas fa-times"></i></button>` : ''}
+          ${roleAtLeast('supervisor') ? `<button class="btn btn-link text-danger p-0 ms-auto" style="font-size:0.7rem" onclick="deleteWarning('${w.id}')"><i class="fas fa-times"></i></button>` : ''}
         </div>`).join('') + `</div>` : (isActive ? `<div class="mt-1" style="font-size:0.73rem;color:${tier.color}"><i class="fas fa-exclamation-circle me-1"></i>Not yet issued — use Log button to record.</div>` : '')}
     </div>`;
   }).join('');
@@ -3140,6 +3534,8 @@ window.saveSignedWarning = async (data) => {
       associateName: d.associateName,
       tier: d.tier,
       tierLabel: d.tierLabel,
+      formType: d.formType || 'attendance',
+      formTypeLabel: d.formTypeLabel || 'Attendance Policy',
       points: d.points,
       signedAt: d.signedAt,
       savedAt: new Date().toISOString(),
@@ -3208,7 +3604,7 @@ window.generateCorrectiveAction = async (tierKey, overrideAssocId) => {
     'documented-verbal': `A Documented Verbal Warning has been issued. Associate has been informed of their current attendance point total and the consequences of further occurrences. Associate is expected to improve attendance immediately.`,
     'written-warning':   `A Written Warning has been issued. Associate has been coached on attendance expectations and the impact of continued absences. Any further attendance infractions may result in a Final Warning or termination.`,
     'final-warning':     `A Final Warning has been issued. This is the last corrective step before termination. Associate has been advised that any additional attendance violations will result in immediate termination of employment.`,
-    'termination':       `Associate has been notified of termination of employment due to continued attendance violations after all prior corrective steps were taken.`
+    'termination':       `Associate is being terminated, or will be notified of termination of employment due to continued attendance violations after all prior corrective steps were taken.`
   };
   const planMap = {
     'documented-verbal': `Associate and manager discussed the attendance policy and current point total. Associate is expected to report to work as scheduled. Any future unexcused absences, tardiness, or early departures will result in further disciplinary action.`,
@@ -3397,27 +3793,30 @@ window.generateCorrectiveAction = async (tierKey, overrideAssocId) => {
         <tr>
           <td style="padding:6px 8px 4px;vertical-align:top">
             <div style="font-size:8pt;color:#555;margin-bottom:3px">Employee Signature</div>
-            <div class="sig-canvas-wrap" id="wrap-employee">
-              <canvas id="sig-employee" width="220" height="64" style="border:1.5px solid #555;border-radius:3px;cursor:crosshair;display:block;background:#fff;touch-action:none"></canvas>
-              <button class="clear-btn" onclick="clearSig('sig-employee')">✕ Clear</button>
+            <div class="sig-canvas-wrap" id="wrap-employee" onclick="openSigExpand('employee')" style="position:relative;cursor:pointer;display:inline-block">
+              <canvas id="sig-employee" width="220" height="64" style="border:1.5px solid #334155;border-radius:3px;display:block;background:#fff"></canvas>
+              <div id="sigplaceholder-employee" style="position:absolute;top:0;left:0;right:0;bottom:0;display:flex;align-items:center;justify-content:center;font-size:8pt;color:#94a3b8;pointer-events:none;gap:4px"><span>✏</span><span>Click to sign</span></div>
+              <button class="clear-btn" onclick="event.stopPropagation();clearSig('employee')">✕ Clear</button>
             </div>
             <div class="sig-img-wrap" id="img-employee" style="display:none"><img id="imgdata-employee" style="height:64px;border-bottom:1.5px solid #333"></div>
             <div style="font-size:8.5pt;margin-top:3px">Date: <span id="sigdate-employee"></span></div>
           </td>
           <td style="padding:6px 8px 4px;vertical-align:top">
             <div style="font-size:8pt;color:#555;margin-bottom:3px">Manager Signature</div>
-            <div class="sig-canvas-wrap" id="wrap-manager">
-              <canvas id="sig-manager" width="220" height="64" style="border:1.5px solid #555;border-radius:3px;cursor:crosshair;display:block;background:#fff;touch-action:none"></canvas>
-              <button class="clear-btn" onclick="clearSig('sig-manager')">✕ Clear</button>
+            <div class="sig-canvas-wrap" id="wrap-manager" onclick="openSigExpand('manager')" style="position:relative;cursor:pointer;display:inline-block">
+              <canvas id="sig-manager" width="220" height="64" style="border:1.5px solid #334155;border-radius:3px;display:block;background:#fff"></canvas>
+              <div id="sigplaceholder-manager" style="position:absolute;top:0;left:0;right:0;bottom:0;display:flex;align-items:center;justify-content:center;font-size:8pt;color:#94a3b8;pointer-events:none;gap:4px"><span>✏</span><span>Click to sign</span></div>
+              <button class="clear-btn" onclick="event.stopPropagation();clearSig('manager')">✕ Clear</button>
             </div>
             <div class="sig-img-wrap" id="img-manager" style="display:none"><img id="imgdata-manager" style="height:64px;border-bottom:1.5px solid #333"></div>
             <div style="font-size:8.5pt;margin-top:3px">Date: <span id="sigdate-manager"></span></div>
           </td>
           <td style="padding:6px 8px 4px;vertical-align:top">
             <div style="font-size:8pt;color:#555;margin-bottom:3px">Witness Signature <span style="color:#888">(if employee refuses)</span></div>
-            <div class="sig-canvas-wrap" id="wrap-witness">
-              <canvas id="sig-witness" width="220" height="64" style="border:1.5px solid #555;border-radius:3px;cursor:crosshair;display:block;background:#fff;touch-action:none"></canvas>
-              <button class="clear-btn" onclick="clearSig('sig-witness')">✕ Clear</button>
+            <div class="sig-canvas-wrap" id="wrap-witness" onclick="openSigExpand('witness')" style="position:relative;cursor:pointer;display:inline-block">
+              <canvas id="sig-witness" width="220" height="64" style="border:1.5px solid #334155;border-radius:3px;display:block;background:#fff"></canvas>
+              <div id="sigplaceholder-witness" style="position:absolute;top:0;left:0;right:0;bottom:0;display:flex;align-items:center;justify-content:center;font-size:8pt;color:#94a3b8;pointer-events:none;gap:4px"><span>✏</span><span>Click to sign</span></div>
+              <button class="clear-btn" onclick="event.stopPropagation();clearSig('witness')">✕ Clear</button>
             </div>
             <div class="sig-img-wrap" id="img-witness" style="display:none"><img id="imgdata-witness" style="height:64px;border-bottom:1.5px solid #333"></div>
             <div style="font-size:8.5pt;margin-top:3px">Date: <span id="sigdate-witness"></span></div>
@@ -3434,46 +3833,117 @@ window.generateCorrectiveAction = async (tierKey, overrideAssocId) => {
 </div>
 <div id="save-status" style="text-align:center;margin-top:10px;font-size:10pt;display:none"></div>
 
+<!-- Signature Expand Overlay -->
+<div id="sigExpandOverlay" style="display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(15,23,42,0.78);z-index:99999;align-items:center;justify-content:center">
+  <div style="background:#fff;border-radius:14px;padding:28px;width:700px;max-width:96vw;box-shadow:0 24px 64px rgba(0,0,0,0.35)">
+    <div id="sigExpandLabel" style="font-size:12pt;font-weight:700;color:#1e293b;margin-bottom:4px">Sign Here</div>
+    <div style="font-size:8.5pt;color:#64748b;margin-bottom:14px">Draw your signature below using mouse or touch</div>
+    <canvas id="sigExpandCanvas" width="644" height="220" style="border:2px solid #334155;border-radius:8px;cursor:crosshair;display:block;background:#fff;touch-action:none;width:100%;box-sizing:border-box"></canvas>
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-top:18px">
+      <button onclick="clearExpandSig()" style="padding:9px 20px;background:#f1f5f9;border:1.5px solid #cbd5e1;border-radius:7px;cursor:pointer;font-size:9.5pt;font-weight:600">✕ Clear</button>
+      <div style="display:flex;gap:10px">
+        <button onclick="cancelExpandSig()" style="padding:9px 20px;background:#f1f5f9;border:1.5px solid #cbd5e1;border-radius:7px;cursor:pointer;font-size:9.5pt;font-weight:600">Cancel</button>
+        <button onclick="doneExpandSig()" style="padding:9px 28px;background:#1a2744;color:#fff;border:none;border-radius:7px;cursor:pointer;font-size:9.5pt;font-weight:700;letter-spacing:0.02em">✓ Done</button>
+      </div>
+    </div>
+  </div>
+</div>
+
 <style>
   .clear-btn { font-size:8pt;padding:2px 8px;margin-top:3px;background:#eee;border:1px solid #bbb;border-radius:3px;cursor:pointer; }
-  @media print { #action-bar, .clear-btn, #save-status { display:none!important; } .sig-canvas-wrap { display:none!important; } .sig-img-wrap { display:block!important; } }
+  @media print { #action-bar, .clear-btn, #save-status, #sigExpandOverlay { display:none!important; } .sig-canvas-wrap { display:none!important; } .sig-img-wrap { display:block!important; } }
 </style>
 
 <script>
 (function(){
-  const canvases = ['sig-employee','sig-manager','sig-witness'];
-  canvases.forEach(id => {
-    const canvas = document.getElementById(id);
-    const ctx = canvas.getContext('2d');
-    let drawing = false;
-    ctx.strokeStyle = '#111'; ctx.lineWidth = 2; ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+  // ── Expand overlay logic ──────────────────────────────────────────────
+  var _currentSigRole = null;
+  // Full-resolution signature store — keyed by role, set on Done, cleared on Clear
+  var _sigDataURLs = {};
 
-    function getPos(e) {
-      const r = canvas.getBoundingClientRect();
-      const src = e.touches ? e.touches[0] : e;
-      return { x: src.clientX - r.left, y: src.clientY - r.top };
+  var expandCanvas = document.getElementById('sigExpandCanvas');
+  // Boost internal resolution to 2x for crisp rendering on high-DPI screens
+  var dpr = window.devicePixelRatio || 1;
+  expandCanvas.width  = 1288;
+  expandCanvas.height = 440;
+  expandCanvas.style.width  = '100%';
+  expandCanvas.style.height = '220px';
+  var expandCtx = expandCanvas.getContext('2d');
+  expandCtx.scale(dpr, dpr);
+  expandCtx.strokeStyle = '#111'; expandCtx.lineWidth = 2.5; expandCtx.lineCap = 'round'; expandCtx.lineJoin = 'round';
+  var expandDrawing = false;
+
+  function getExpandPos(e) {
+    var r = expandCanvas.getBoundingClientRect();
+    var scaleX = expandCanvas.width / r.width;
+    var scaleY = expandCanvas.height / r.height;
+    var src = e.touches ? e.touches[0] : e;
+    return { x: (src.clientX - r.left) * scaleX, y: (src.clientY - r.top) * scaleY };
+  }
+  function expandStart(e) { e.preventDefault(); expandDrawing = true; var p = getExpandPos(e); expandCtx.beginPath(); expandCtx.moveTo(p.x, p.y); }
+  function expandMove(e) { e.preventDefault(); if (!expandDrawing) return; var p = getExpandPos(e); expandCtx.lineTo(p.x, p.y); expandCtx.stroke(); }
+  function expandEnd(e) { e.preventDefault(); expandDrawing = false; }
+
+  expandCanvas.addEventListener('mousedown', expandStart);
+  expandCanvas.addEventListener('mousemove', expandMove);
+  expandCanvas.addEventListener('mouseup', expandEnd);
+  expandCanvas.addEventListener('mouseleave', expandEnd);
+  expandCanvas.addEventListener('touchstart', expandStart, {passive:false});
+  expandCanvas.addEventListener('touchmove', expandMove, {passive:false});
+  expandCanvas.addEventListener('touchend', expandEnd);
+
+  window.openSigExpand = function(role) {
+    _currentSigRole = role;
+    expandCtx.clearRect(0, 0, expandCanvas.width, expandCanvas.height);
+    // If a full-res sig already exists, load it back in for editing
+    if (_sigDataURLs[role]) {
+      var img = new Image();
+      img.onload = function() { expandCtx.drawImage(img, 0, 0, expandCanvas.width, expandCanvas.height); };
+      img.src = _sigDataURLs[role];
     }
-    function start(e) { e.preventDefault(); drawing = true; const p = getPos(e); ctx.beginPath(); ctx.moveTo(p.x, p.y); }
-    function move(e) { e.preventDefault(); if (!drawing) return; const p = getPos(e); ctx.lineTo(p.x, p.y); ctx.stroke(); }
-    function end(e) { e.preventDefault(); drawing = false; }
+    var labels = { employee: 'Employee Signature', manager: 'Manager Signature', witness: 'Witness Signature' };
+    document.getElementById('sigExpandLabel').textContent = labels[role] || 'Sign Here';
+    document.getElementById('sigExpandOverlay').style.display = 'flex';
+  };
 
-    canvas.addEventListener('mousedown', start);
-    canvas.addEventListener('mousemove', move);
-    canvas.addEventListener('mouseup', end);
-    canvas.addEventListener('mouseleave', end);
-    canvas.addEventListener('touchstart', start, {passive:false});
-    canvas.addEventListener('touchmove', move, {passive:false});
-    canvas.addEventListener('touchend', end);
-  });
+  window.clearExpandSig = function() {
+    expandCtx.clearRect(0, 0, expandCanvas.width, expandCanvas.height);
+  };
 
-  window.clearSig = function(id) {
-    const canvas = document.getElementById(id);
-    canvas.getContext('2d').clearRect(0,0,canvas.width,canvas.height);
+  window.cancelExpandSig = function() {
+    document.getElementById('sigExpandOverlay').style.display = 'none';
+    _currentSigRole = null;
+  };
+
+  window.doneExpandSig = function() {
+    if (!_currentSigRole) return;
+    // Store full-resolution dataURL — this is what gets saved and printed
+    _sigDataURLs[_currentSigRole] = expandCanvas.toDataURL('image/png');
+    // Draw a downscaled thumbnail on the small preview canvas only
+    var smallCanvas = document.getElementById('sig-' + _currentSigRole);
+    var ctx = smallCanvas.getContext('2d');
+    ctx.clearRect(0, 0, smallCanvas.width, smallCanvas.height);
+    ctx.drawImage(expandCanvas, 0, 0, smallCanvas.width, smallCanvas.height);
+    var placeholder = document.getElementById('sigplaceholder-' + _currentSigRole);
+    if (placeholder) placeholder.style.display = 'none';
+    document.getElementById('sigExpandOverlay').style.display = 'none';
+    _currentSigRole = null;
+  };
+
+  window.clearSig = function(role) {
+    delete _sigDataURLs[role];
+    var canvas = document.getElementById('sig-' + role);
+    canvas.getContext('2d').clearRect(0, 0, canvas.width, canvas.height);
+    var placeholder = document.getElementById('sigplaceholder-' + role);
+    if (placeholder) placeholder.style.display = 'flex';
   };
 
   function isBlank(canvas) {
-    const d = canvas.getContext('2d').getImageData(0,0,canvas.width,canvas.height).data;
-    for (let i=3; i<d.length; i+=4) { if (d[i] > 0) return false; }
+    // Check full-res store first
+    var role = canvas.id ? canvas.id.replace('sig-', '') : '';
+    if (_sigDataURLs[role]) return false;
+    var d = canvas.getContext('2d').getImageData(0,0,canvas.width,canvas.height).data;
+    for (var i=3; i<d.length; i+=4) { if (d[i] > 0) return false; }
     return true;
   }
 
@@ -3497,7 +3967,8 @@ window.generateCorrectiveAction = async (tierKey, overrideAssocId) => {
     ['employee','manager','witness'].forEach(role => {
       const c = document.getElementById('sig-'+role);
       if (!isBlank(c)) {
-        sigs[role] = c.toDataURL('image/png');
+        // Use full-res dataURL if available, fall back to canvas
+        sigs[role] = _sigDataURLs[role] || c.toDataURL('image/png');
         document.getElementById('sigdate-'+role).textContent = todayStr;
         document.getElementById('imgdata-'+role).src = sigs[role];
         document.getElementById('img-'+role).style.display = 'block';
@@ -3551,6 +4022,421 @@ window.generateCorrectiveAction = async (tierKey, overrideAssocId) => {
 </div><!-- end #page-wrap -->
 </body>
 </html>`;
+
+  win.document.open();
+  win.document.write(html);
+  win.document.close();
+};
+
+// ─── General Corrective Action Forms ──────────────────────────────────────
+const GENERAL_CORRECTIVE_TYPES = [
+  { key: 'boisterous',        label: 'Boisterous or Disruptive Activity in the Workplace',         short: 'Disruptive Activity',        icon: 'fa-volume-up',   color: '#dc2626', bg: '#fee2e2', offense: 'Boisterous or Disruptive Activity',
+    section: '§4.5 / §5.3',
+    sectionDesc: 'Listed as a reasonable-suspicion indicator under §4.5 (Substance Abuse — boisterous, loud, or nonsensical behavior). §5.3 (Warehouse Safety Rules) separately prohibits running or horseplay in the warehouse.' },
+  { key: 'dress-code',        label: 'Dress Code Violation',                                        short: 'Dress Code',                 icon: 'fa-tshirt',      color: '#d97706', bg: '#fef3c7', offense: 'Dress Code',
+    section: '§4.4',
+    sectionDesc: 'Dress Code and Personal Appearance Standards — covers acceptable and unacceptable attire, PPE-related footwear requirements, grooming standards, and the accommodation process for religious, disability, or ethnicity-related needs.' },
+  { key: 'insubordination',   label: 'Insubordination or Other Disrespectful Conduct',              short: 'Insubordination',            icon: 'fa-hand-paper',  color: '#7c3aed', bg: '#ede9fe', offense: 'Insubordination or Disrespectful Conduct',
+    section: '§4.1 / §3.2',
+    sectionDesc: '§4.1 (Work Rules) lists insubordinate behavior as unacceptable conduct subject to discipline. §3.2 (Unlawful Harassment) separately prohibits harassment, abuse, bullying, and disrespectful conduct toward employees.' },
+  { key: 'negligence',        label: 'Negligence or Improper Conduct — Property Damage',            short: 'Negligence / Damage',        icon: 'fa-tools',       color: '#b45309', bg: '#fef3c7', offense: 'Negligence or Property Damage',
+    section: '§4.1',
+    sectionDesc: '§4.1 (Work Rules) lists negligence or improper conduct leading to damage of Company-owned or customer-owned property as grounds for discipline up to and including termination.' },
+  { key: 'electronic-devices',label: 'Personal Electronic Devices in the Warehouse',               short: 'Electronic Devices',         icon: 'fa-mobile-alt',  color: '#0369a1', bg: '#e0f2fe', offense: 'Personal Electronic Device Policy',
+    section: '§4.3 / §5.2',
+    sectionDesc: '§4.3 governs general PED use and storage requirements company-wide. §5.2 is the warehouse-specific prohibition — no phones or PEDs inside the warehouse at all, with a supervisor-level exception for approved business use only.' },
+  { key: 'weapons',           label: 'Possession or Use of Guns, Weapons, or Knives',              short: 'Weapons Policy',             icon: 'fa-ban',         color: '#991b1b', bg: '#fee2e2', offense: 'Weapons Policy',
+    section: '§3.18.1 / §4.1',
+    sectionDesc: '§3.18.1 (Workplace Violence) prohibits bringing, possessing, or threatening to bring guns, firearms, or weapons of any kind onto Company property. §4.1 (Work Rules) separately lists possession or use of guns, weapons, or knives as unacceptable conduct.' },
+  { key: 'safety',            label: 'Safety Violation',                                            short: 'Safety Violation',           icon: 'fa-hard-hat',    color: '#b45309', bg: '#fef9c3', offense: 'Safety Rules Violation',
+    section: '§5.5',
+    sectionDesc: '§5.5 (Serious and Other Safety Violations) distinguishes "Serious" violations — eligible for immediate termination, e.g., PED use while operating powered equipment, harness removal at height — from "Other" violations subject to progressive discipline.' },
+  { key: 'timekeeping',       label: 'Timekeeping Violation',                                       short: 'Timekeeping',                icon: 'fa-clock',       color: '#0f766e', bg: '#d1fae5', offense: 'Timekeeping Policy',
+    section: '§7.2',
+    sectionDesc: '§7.2 (Timekeeping) covers clock in/out requirements, prohibition on falsifying time records or working off-the-clock, and the requirement for supervisor approval of timecards.' },
+  { key: 'theft',             label: 'Work Rules 401 — Theft or Improper Removal of Property',     short: 'Theft / Property Removal',   icon: 'fa-shield-alt',  color: '#1d4ed8', bg: '#dbeafe', offense: 'Theft / Improper Removal of Property',
+    section: '§4.1 / §3.15',
+    sectionDesc: '§4.1 (Work Rules) and §3.15 (Corrective Action) both list theft, inappropriate removal or possession of property, and misappropriation of property as conduct subject to discipline up to and including immediate termination.' },
+  { key: 'performance',       label: 'Performance — Failure to Meet Job Expectations',              short: 'Performance',                icon: 'fa-chart-line',  color: '#374151', bg: '#f3f4f6', offense: 'Failure to Meet Job Expectations',
+    section: '§4.1 / §3.16',
+    sectionDesc: '§4.1 (Work Rules) lists unsatisfactory work performance as unacceptable conduct subject to discipline up to and including termination: "Employees who deviate from these rules and standards will be subject to discipline, up to and including termination of employment." §3.16 (Progressive Discipline) establishes the correction structure — Coaching & Counseling → Written Warning → Final Warning → Termination.' }
+];
+
+window.openCorrectivePicker = () => {
+  // Populate grid each time (ensures types are in scope)
+  const grid = document.getElementById('correctivePickerGrid');
+  if (grid) {
+    const allTypes = GENERAL_CORRECTIVE_TYPES.concat([
+      { key: '__jobabandonment__', short: 'Job Abandonment', icon: 'fa-user-slash', color: '#7c0000', bg: '#fee2e2' }
+    ]);
+    grid.innerHTML = allTypes.map(t =>
+      '<button onclick="selectCorrective(\'' + t.key + '\')" style="'
+      + 'display:flex;align-items:center;gap:12px;padding:13px 15px;border:1.5px solid rgba(255,255,255,0.14);'
+      + 'border-radius:10px;background:rgba(255,255,255,0.07);color:#fff;cursor:pointer;text-align:left;'
+      + 'transition:background 0.15s,border-color 0.15s;font-family:inherit;width:100%"'
+      + ' onmouseover="this.style.background=\'rgba(255,255,255,0.15)\';this.style.borderColor=\'rgba(255,255,255,0.4)\'"'
+      + ' onmouseout="this.style.background=\'rgba(255,255,255,0.07)\';this.style.borderColor=\'rgba(255,255,255,0.14)\'">'
+      + '<span style="width:34px;height:34px;border-radius:8px;background:' + t.bg + ';display:flex;align-items:center;justify-content:center;flex-shrink:0">'
+      + '<i class="fas ' + t.icon + '" style="color:' + t.color + ';font-size:0.9rem"></i></span>'
+      + '<span style="font-size:0.82rem;font-weight:600;line-height:1.3">' + t.short + '</span>'
+      + '</button>'
+    ).join('');
+  }
+  const m = bootstrap.Modal.getOrCreateInstance(document.getElementById('correctivePickerModal'));
+  m.show();
+};
+
+window.selectCorrective = (key) => {
+  bootstrap.Modal.getInstance(document.getElementById('correctivePickerModal'))?.hide();
+  if (key === '__jobabandonment__') { setTimeout(() => generateJobAbandonmentDoc(), 300); return; }
+  const type = GENERAL_CORRECTIVE_TYPES.find(t => t.key === key);
+  if (!type) return;
+  const assoc = allAssociates.find(a => a.id === currentAssociateId);
+  if (!assoc) return;
+
+  document.getElementById('gcFormTitle').textContent = type.label;
+  document.getElementById('gcTypeKey').value = key;
+  document.getElementById('gcIncidentDate').value = new Date().toISOString().split('T')[0];
+  document.getElementById('gcTier').value = 'verbal';
+  document.getElementById('gcDescription').value = '';
+  document.getElementById('gcPriorHistory').value = '';
+  document.getElementById('gcActionTaken').value = '';
+  document.getElementById('gcPlanImprovement').value = '';
+  gcUpdateTierDefaults();
+
+  setTimeout(() => {
+    const m2 = bootstrap.Modal.getOrCreateInstance(document.getElementById('issueCorrectiveModal'));
+    m2.show();
+  }, 300);
+};
+
+window.gcUpdateTierDefaults = () => {
+  const tier    = document.getElementById('gcTier').value;
+  const typeKey = document.getElementById('gcTypeKey').value;
+  const type    = GENERAL_CORRECTIVE_TYPES.find(t => t.key === typeKey);
+  const offense = type ? type.offense : 'Policy Violation';
+
+  const actionDefaults = {
+    'verbal':      'A Documented Verbal Warning has been issued. Associate has been counseled regarding the ' + offense + ' policy. Associate is expected to correct this behavior immediately.',
+    'written':     'A First Written Warning has been issued. Associate has been formally warned regarding the ' + offense + ' policy. Further infractions may result in escalating disciplinary action up to and including termination.',
+    'final':       'A Final Warning has been issued. This is the last corrective step before termination. Any future ' + offense + ' violations will result in immediate termination of employment.',
+    'termination': 'Associate is being terminated, or will be notified of termination of employment due to continued or severe policy violations.'
+  };
+  const planDefaults = {
+    'verbal':      'Associate and manager discussed the ' + offense + ' policy expectations. Associate is expected to demonstrate immediate and sustained compliance with all company policies.',
+    'written':     'Associate has previously received coaching regarding this policy. Associate must demonstrate immediate improvement and full compliance going forward. Failure to do so will result in further disciplinary action.',
+    'final':       'This is the final opportunity to correct the behavior in question. Associate must be fully compliant with all company policies. Zero future violations will be tolerated.',
+    'termination': 'N/A — Employment has been terminated.'
+  };
+
+  const actionEl = document.getElementById('gcActionTaken');
+  const planEl   = document.getElementById('gcPlanImprovement');
+  // Only auto-fill if blank or already contains a default
+  const allActions = Object.values(actionDefaults);
+  const allPlans   = Object.values(planDefaults);
+  if (!actionEl.value || allActions.some(v => actionEl.value.startsWith(v.substring(0, 40)))) {
+    actionEl.value = actionDefaults[tier] || '';
+  }
+  if (!planEl.value || allPlans.some(v => planEl.value.startsWith(v.substring(0, 40)))) {
+    planEl.value = planDefaults[tier] || '';
+  }
+};
+
+// Shared static strings for the general corrective popup window (defined once, reused per call)
+const _GC_CSS = '<style>*{box-sizing:border-box;margin:0;padding:0}#page-wrap{max-width:960px;margin:0 auto;padding:48px 72px;background:#fff}@page{margin:.75in}.doc-title{text-align:center;border:2px solid #1a2744;padding:10px 0 6px}.doc-title h1{font-size:16pt;font-weight:700;letter-spacing:1px;color:#1a2744;text-transform:uppercase}.doc-title h2{font-size:10pt;font-weight:700;color:#333;margin-top:2px}.outer-table{width:100%;border-collapse:collapse;border:1.5px solid #1a2744}.outer-table td{border:1px solid #aaa;padding:0;vertical-align:top}.sec-header{background:#1a2744;color:#fff;font-weight:700;font-size:9.5pt;text-transform:uppercase;letter-spacing:.5px;padding:6px 16px}.field-cell{padding:8px 16px 5px}.field-label{font-size:8pt;color:#555;margin-bottom:1px}.field-value{font-size:10.5pt;font-weight:600;border-bottom:1px solid #333;min-height:20px;padding-bottom:2px}.check-table{width:100%;border-collapse:collapse}.check-table td{padding:5px 14px;border:none;vertical-align:middle;font-size:10pt}.text-area-cell{padding:8px 16px;font-size:10pt;min-height:68px;line-height:1.55}.text-area-cell.short{min-height:44px}.sig-table{width:100%;border-collapse:collapse}.sig-table td{padding:24px 10px 6px;border:1px solid #aaa;vertical-align:bottom;font-size:9.5pt;width:33%}.clear-btn{font-size:8pt;padding:2px 8px;margin-top:3px;background:#eee;border:1px solid #bbb;border-radius:3px;cursor:pointer}@media print{button{display:none!important}#page-wrap{margin:0!important;padding:.15in .45in!important;max-width:100%!important}*{-webkit-print-color-adjust:exact!important;print-color-adjust:exact!important}.text-area-cell{min-height:30px!important;padding:4px 10px!important}.sig-table td{padding:10px 8px 3px!important}.field-cell{padding:4px 10px 3px!important}.sec-header{padding:3px 10px!important}#action-bar,#save-status,#sigExpandOverlay{display:none!important}.sig-canvas-wrap{display:none!important}.sig-img-wrap{display:block!important}}</style>';
+
+const _GC_SIG_OVERLAY = '<div id="sigExpandOverlay" style="display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(15,23,42,.78);z-index:99999;align-items:center;justify-content:center"><div style="background:#fff;border-radius:14px;padding:28px;width:700px;max-width:96vw;box-shadow:0 24px 64px rgba(0,0,0,.35)"><div id="sigExpandLabel" style="font-size:12pt;font-weight:700;color:#1e293b;margin-bottom:4px">Sign Here</div><div style="font-size:8.5pt;color:#64748b;margin-bottom:14px">Draw your signature below using mouse or touch</div><canvas id="sigExpandCanvas" width="644" height="220" style="border:2px solid #334155;border-radius:8px;cursor:crosshair;display:block;background:#fff;touch-action:none;width:100%;box-sizing:border-box"></canvas><div style="display:flex;justify-content:space-between;align-items:center;margin-top:18px"><button onclick="clearExpandSig()" style="padding:9px 20px;background:#f1f5f9;border:1.5px solid #cbd5e1;border-radius:7px;cursor:pointer;font-size:9.5pt;font-weight:600">✕ Clear</button><div style="display:flex;gap:10px"><button onclick="cancelExpandSig()" style="padding:9px 20px;background:#f1f5f9;border:1.5px solid #cbd5e1;border-radius:7px;cursor:pointer;font-size:9.5pt;font-weight:600">Cancel</button><button onclick="doneExpandSig()" style="padding:9px 28px;background:#1a2744;color:#fff;border:none;border-radius:7px;cursor:pointer;font-size:9.5pt;font-weight:700">✓ Done</button></div></div></div></div>';
+
+const _GC_SIG_INIT = '(function(){var _r=null,_d={},ec=document.getElementById("sigExpandCanvas"),dpr=window.devicePixelRatio||1;ec.width=1288;ec.height=440;ec.style.width="100%";ec.style.height="220px";var x=ec.getContext("2d");x.scale(dpr,dpr);x.strokeStyle="#111";x.lineWidth=2.5;x.lineCap="round";x.lineJoin="round";var draw=false;function pos(e){var r=ec.getBoundingClientRect(),s=e.touches?e.touches[0]:e;return{x:(s.clientX-r.left)*(ec.width/r.width),y:(s.clientY-r.top)*(ec.height/r.height)}}function ds(e){e.preventDefault();draw=true;var p=pos(e);x.beginPath();x.moveTo(p.x,p.y)}function dm(e){e.preventDefault();if(!draw)return;var p=pos(e);x.lineTo(p.x,p.y);x.stroke()}function de(e){e.preventDefault();draw=false}ec.addEventListener("mousedown",ds);ec.addEventListener("mousemove",dm);ec.addEventListener("mouseup",de);ec.addEventListener("mouseleave",de);ec.addEventListener("touchstart",ds,{passive:false});ec.addEventListener("touchmove",dm,{passive:false});ec.addEventListener("touchend",de);window.openSigExpand=function(role){_r=role;x.clearRect(0,0,ec.width,ec.height);if(_d[role]){var i=new Image();i.onload=function(){x.drawImage(i,0,0,ec.width,ec.height)};i.src=_d[role]}var L={employee:"Employee Signature",manager:"Manager Signature",witness:"Witness Signature"};document.getElementById("sigExpandLabel").textContent=L[role]||"Sign Here";document.getElementById("sigExpandOverlay").style.display="flex"};window.clearExpandSig=function(){x.clearRect(0,0,ec.width,ec.height)};window.cancelExpandSig=function(){document.getElementById("sigExpandOverlay").style.display="none";_r=null};window.doneExpandSig=function(){if(!_r)return;_d[_r]=ec.toDataURL("image/png");var sc=document.getElementById("sig-"+_r),c=sc.getContext("2d");c.clearRect(0,0,sc.width,sc.height);c.drawImage(ec,0,0,sc.width,sc.height);var ph=document.getElementById("sigplaceholder-"+_r);if(ph)ph.style.display="none";document.getElementById("sigExpandOverlay").style.display="none";_r=null};window.clearSig=function(role){delete _d[role];var cv=document.getElementById("sig-"+role);cv.getContext("2d").clearRect(0,0,cv.width,cv.height);var ph=document.getElementById("sigplaceholder-"+role);if(ph)ph.style.display="flex"};function blank(cv){var role=cv.id?cv.id.replace("sig-",""):"";if(_d[role])return false;var px=cv.getContext("2d").getImageData(0,0,cv.width,cv.height).data;for(var i=3;i<px.length;i+=4){if(px[i]>0)return false}return true}function td(){var d=new Date();return(d.getMonth()+1)+"/"+d.getDate()+"/"+d.getFullYear()}';
+
+function _gcSigBox(role, label) {
+  const extra = role === 'witness' ? ' <span style="color:#888">(if employee refuses)</span>' : '';
+  return '<td style="padding:6px 8px 4px;vertical-align:top">'
+    + '<div style="font-size:8pt;color:#555;margin-bottom:3px">' + label + extra + '</div>'
+    + '<div class="sig-canvas-wrap" id="wrap-' + role + '" onclick="openSigExpand(\'' + role + '\')" style="position:relative;cursor:pointer;display:inline-block">'
+    + '<canvas id="sig-' + role + '" width="220" height="64" style="border:1.5px solid #334155;border-radius:3px;display:block;background:#fff"></canvas>'
+    + '<div id="sigplaceholder-' + role + '" style="position:absolute;top:0;left:0;right:0;bottom:0;display:flex;align-items:center;justify-content:center;font-size:8pt;color:#94a3b8;pointer-events:none;gap:4px"><span>✏</span><span>Click to sign</span></div>'
+    + '<button class="clear-btn" onclick="event.stopPropagation();clearSig(\'' + role + '\')">✕ Clear</button>'
+    + '</div>'
+    + '<div class="sig-img-wrap" id="img-' + role + '" style="display:none"><img id="imgdata-' + role + '" style="height:64px;border-bottom:1.5px solid #333"></div>'
+    + '<div style="font-size:8.5pt;margin-top:3px">Date: <span id="sigdate-' + role + '"></span></div>'
+    + '</td>';
+}
+
+function _gcCheck(checked) {
+  return checked
+    ? '<td style="width:22px;text-align:center"><span style="display:inline-flex;align-items:center;justify-content:center;width:15px;height:15px;border:1.5px solid #222;background:#1a2744;color:#fff;font-size:11px;font-weight:700">✓</span></td>'
+    : '<td style="width:22px;text-align:center"><span style="display:inline-block;width:15px;height:15px;border:1.5px solid #555"></span></td>';
+}
+
+window.generateGeneralCorrective = () => {
+  const assoc = allAssociates.find(a => a.id === currentAssociateId);
+  if (!assoc) return;
+  const typeKey = document.getElementById('gcTypeKey').value;
+  const type    = GENERAL_CORRECTIVE_TYPES.find(t => t.key === typeKey);
+  const tier    = document.getElementById('gcTier').value;
+  const incDate = document.getElementById('gcIncidentDate').value;
+  const desc    = document.getElementById('gcDescription').value.trim();
+  const prior   = document.getElementById('gcPriorHistory').value.trim();
+  const action  = document.getElementById('gcActionTaken').value.trim();
+  const plan    = document.getElementById('gcPlanImprovement').value.trim();
+  if (!desc) { alert('Please enter a description of the incident before generating the form.'); return; }
+
+  const TIER_LABELS = { verbal:'Verbal Warning', written:'First Written Warning', final:'Final Warning', termination:'Termination' };
+  const tierLabel  = TIER_LABELS[tier] || tier;
+  const incDateFmt = incDate ? new Date(incDate + 'T00:00:00').toLocaleDateString('en-US',{month:'long',day:'numeric',year:'numeric'}) : '—';
+  const today      = new Date().toLocaleDateString('en-US',{month:'long',day:'numeric',year:'numeric'});
+  const resolvedId = currentAssociateId;
+  const conseq     = tier === 'termination' ? 'Employment is being terminated.' : 'Any further violations of this or any other company policy may result in further disciplinary action up to and including termination of employment.';
+
+  const win = window.open('', '_blank', 'width=1000,height=850,scrollbars=yes,resizable=yes');
+  if (!win) { alert('Pop-ups are blocked. Please allow pop-ups for this page.'); return; }
+  win.document.write('<html><body style="font-family:Arial;padding:40px;color:#666;text-align:center"><p>Loading…</p></body></html>');
+  bootstrap.Modal.getInstance(document.getElementById('issueCorrectiveModal'))?.hide();
+
+  const eh = escapeHtml, nl = s => eh(s).replace(/\n/g,'<br>');
+  const typeLabel   = eh(type ? type.label : typeKey);
+  const sectionCode = eh(type ? type.section : '');
+  const sectionDesc = eh(type ? type.sectionDesc : '');
+  const aName = eh(assoc.name), aId = eh(assoc.employeeId||''), aRole = eh(assoc.role||''), aDept = eh(assoc.department||'LAS1 Operations');
+
+  const saveScript = 'window.saveAndPrint=async function(){'
+    + 'var eC=document.getElementById("sig-employee"),mC=document.getElementById("sig-manager");'
+    + 'if(blank(eC)&&blank(mC)){alert("Please provide at least one signature before saving.");return;}'
+    + 'var ts=td(),sigs={};'
+    + '["employee","manager","witness"].forEach(function(role){'
+    + 'var c=document.getElementById("sig-"+role);if(!blank(c)){'
+    + 'sigs[role]=_d[role]||c.toDataURL("image/png");'
+    + 'document.getElementById("sigdate-"+role).textContent=ts;'
+    + 'document.getElementById("imgdata-"+role).src=sigs[role];'
+    + 'document.getElementById("img-"+role).style.display="block";'
+    + 'document.getElementById("wrap-"+role).style.display="none";}});'
+    + 'var st=document.getElementById("save-status"),ab=document.getElementById("action-bar");'
+    + 'st.style.display="block";st.style.color="#555";st.textContent="Saving to HR records…";'
+    + 'ab.style.display="none";st.style.display="none";'
+    + 'var dh="<!DOCTYPE html>"+document.documentElement.outerHTML;'
+    + 'ab.style.display="";st.style.display="block";'
+    + 'try{if(window.opener&&window.opener.saveSignedWarning){'
+    + 'await window.opener.saveSignedWarning({associateId:"' + resolvedId + '",associateName:"' + assoc.name.replace(/"/g,'\\"') + '",tier:"' + tier + '",tierLabel:"' + tierLabel + '",formType:"' + typeKey + '",formTypeLabel:"' + (type?type.label.replace(/"/g,'\\"'):typeKey) + '",points:0,signedAt:ts,signatures:sigs,documentHtml:dh});'
+    + 'st.style.color="#16a34a";st.innerHTML="✓ Saved to HR records.&nbsp;<button onclick=\\"window.print()\\" style=\\"padding:6px 18px;background:#1a2744;color:#fff;border:none;border-radius:4px;cursor:pointer\\">🖶️ Print</button>";'
+    + '}else{st.style.color="#d97706";st.innerHTML="⚠ Could not reach main app.&nbsp;<button onclick=\\"window.print()\\" style=\\"padding:6px 18px;background:#555;color:#fff;border:none;border-radius:4px;cursor:pointer\\">🖶️ Print</button>";}'
+    + '}catch(err){st.style.color="#dc2626";st.textContent="✗ Save failed: "+err.message;}};})();';
+
+  const html = '<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8">'
+    + '<title>Employee Warning Notice — ' + aName + '</title>'
+    + _GC_CSS + '</head>'
+    + '<body style="font-family:Arial,sans-serif;font-size:10.5pt;color:#111;background:#fff;">'
+    + '<div id="page-wrap">'
+    + '<div class="doc-title"><div style="font-size:8.5pt;color:#555;letter-spacing:2px;margin-bottom:4px">CarParts.com</div>'
+    + '<h1>Employee Warning Notice</h1><h2>' + typeLabel + '</h2></div>'
+    + '<table class="outer-table" style="margin-top:0">'
+    + '<tr><td colspan="4" class="sec-header">Employee Information</td></tr>'
+    + '<tr><td style="width:50%" class="field-cell"><div class="field-label">Employee Name :</div><div class="field-value" style="text-align:center">' + aName + '</div></td>'
+    + '<td style="width:50%" class="field-cell"><div class="field-label">Date :</div><div class="field-value" style="text-align:center">' + today + '</div></td></tr>'
+    + '<tr><td class="field-cell"><div class="field-label">Employee ID :</div><div class="field-value" style="text-align:center">' + aId + '</div></td>'
+    + '<td class="field-cell"><div class="field-label">Job Title :</div><div class="field-value" style="text-align:center">' + aRole + '</div></td></tr>'
+    + '<tr><td class="field-cell"><div class="field-label">Manager :</div><div class="field-value" style="text-align:center">Hector Marron</div></td>'
+    + '<td class="field-cell"><div class="field-label">Department :</div><div class="field-value" style="text-align:center">' + aDept + '</div></td></tr>'
+    + '<tr><td colspan="4" class="sec-header">Type of Warning</td></tr>'
+    + '<tr><td colspan="4"><table class="check-table"><tr>'
+    + _gcCheck(tier==='verbal') + '<td>Verbal Warning</td>'
+    + _gcCheck(tier==='written') + '<td>First Written Warning</td>'
+    + _gcCheck(tier==='final') + '<td>Final Warning</td>'
+    + _gcCheck(tier==='termination') + '<td>Termination</td>'
+    + '</tr></table></td></tr>'
+    + '<tr><td colspan="4" class="sec-header">Type of Offense</td></tr>'
+    + '<tr><td colspan="4"><table class="check-table">'
+    + '<tr>' + _gcCheck(typeKey==='boisterous') + '<td>Boisterous / Disruptive Activity</td>' + _gcCheck(typeKey==='dress-code') + '<td>Dress Code Violation</td>' + _gcCheck(typeKey==='insubordination') + '<td>Insubordination / Disrespectful Conduct</td></tr>'
+    + '<tr>' + _gcCheck(typeKey==='negligence') + '<td>Negligence / Property Damage</td>' + _gcCheck(typeKey==='electronic-devices') + '<td>Personal Electronic Device Violation</td>' + _gcCheck(typeKey==='weapons') + '<td>Weapons Policy Violation</td></tr>'
+    + '<tr>' + _gcCheck(typeKey==='safety') + '<td>Safety Rule Violation</td>' + _gcCheck(typeKey==='timekeeping') + '<td>Timekeeping Violation</td>' + _gcCheck(typeKey==='theft') + '<td>Theft / Improper Removal of Property</td></tr>'
+    + '<tr>' + _gcCheck(typeKey==='performance') + '<td>Performance — Failure to Meet Job Expectations</td><td></td><td></td></tr>'
+    + '</table></td></tr>'
+    + '<tr><td colspan="4" class="sec-header">Applicable Policy Reference</td></tr>'
+    + '<tr><td class="field-cell" style="width:18%;vertical-align:top"><div class="field-label">Section Code</div><div style="font-size:11pt;font-weight:700;color:#1a2744;margin-top:4px">' + sectionCode + '</div></td>'
+    + '<td colspan="3" class="field-cell" style="vertical-align:top"><div class="field-label" style="margin-bottom:3px">Policy Description</div><div style="font-size:9.5pt;line-height:1.5;color:#333">' + sectionDesc + '</div></td></tr>'
+    + '<tr><td colspan="4" class="sec-header">Details</td></tr>'
+    + '<tr><td class="field-cell" style="width:26%;vertical-align:top">'
+    + '<div class="field-label">Date of Incident :</div><div class="field-value" style="text-align:center">' + incDateFmt + '</div>'
+    + '<div style="margin-top:12px"><div class="field-label">Warning Level :</div><div style="font-size:13pt;font-weight:900;color:#1a2744;margin-top:4px;border-bottom:2px solid #1a2744;padding-bottom:4px">' + eh(tierLabel) + '</div></div>'
+    + '<div style="margin-top:10px"><div class="field-label">Corrective Issued :</div><div class="field-value">' + today + '</div></div>'
+    + '</td><td colspan="3" class="field-cell" style="vertical-align:top">'
+    + '<div class="field-label" style="font-weight:bold;color:#111;margin-bottom:4px">Description of Incident :</div>'
+    + '<div class="text-area-cell" style="padding:0;min-height:88px">' + nl(desc) + '</div>'
+    + (prior ? '<div class="field-label" style="font-weight:bold;color:#111;margin-top:8px;margin-bottom:4px">Prior History :</div><div class="text-area-cell short" style="padding:0">' + nl(prior) + '</div>' : '')
+    + '</td></tr>'
+    + '<tr><td colspan="4" class="field-cell"><div class="field-label" style="font-weight:bold;color:#111;margin-bottom:3px">Plan for Improvement :</div><div class="text-area-cell" style="padding:0">' + nl(plan) + '</div></td></tr>'
+    + '<tr><td colspan="4" class="field-cell"><div class="field-label" style="margin-bottom:2px"><strong>Action Taken :</strong></div><div class="text-area-cell short" style="padding:0">' + nl(action) + '</div></td></tr>'
+    + '<tr><td colspan="4" class="field-cell"><div class="field-label" style="margin-bottom:2px"><strong>Consequences of Further Infractions :</strong></div><div class="text-area-cell short" style="padding:0">' + eh(conseq) + '</div></td></tr>'
+    + '<tr><td colspan="4" class="sec-header">Acknowledgement of Receipt of Warning</td></tr>'
+    + '<tr><td colspan="4" style="padding:6px 8px;font-size:9.5pt;color:#444">By signing this form, you confirm that you understand the information in this warning. You also confirm that you and your manager have discussed the warning and a plan for improvement. Signing this form does not necessarily indicate that you agree with this warning.</td></tr>'
+    + '<tr><td colspan="4" style="padding:0"><table class="sig-table"><tr>'
+    + _gcSigBox('employee','Employee Signature')
+    + _gcSigBox('manager','Manager Signature')
+    + _gcSigBox('witness','Witness Signature')
+    + '</tr></table></td></tr>'
+    + '</table>'
+    + '<div id="action-bar" style="text-align:center;margin-top:20px;display:flex;gap:12px;justify-content:center;flex-wrap:wrap">'
+    + '<button onclick="window.print()" style="padding:10px 28px;background:#555;color:#fff;border:none;border-radius:6px;font-size:10.5pt;cursor:pointer;font-weight:bold">🖶️ Print Unsigned Copy</button>'
+    + '<button onclick="saveAndPrint()" style="padding:10px 28px;background:#1a2744;color:#fff;border:none;border-radius:6px;font-size:10.5pt;cursor:pointer;font-weight:bold">✍️ Save &amp; Download PDF</button>'
+    + '</div><div id="save-status" style="text-align:center;margin-top:10px;font-size:10pt;display:none"></div>'
+    + _GC_SIG_OVERLAY
+    + '<script>' + _GC_SIG_INIT + saveScript + '<\/script>'
+    + '</div></body></html>';
+
+  win.document.open();
+  win.document.write(html);
+  win.document.close();
+};
+
+// ─── Job Abandonment Document ──────────────────────────────────────────────
+window.generateJobAbandonmentDoc = () => {
+  const assoc = allAssociates.find(a => a.id === currentAssociateId);
+  if (!assoc) return;
+
+  // Sort ALL entries oldest→newest to detect consecutive streaks
+  const sorted = [...(lastAttendance || [])].sort((a, b) => a.date.localeCompare(b.date));
+
+  // Find all runs of 3+ consecutive NCNS with no other entries between them
+  // "Consecutive" = no non-NCNS attendance entry appears between the NCNS dates
+  const runs = [];
+  let current = [];
+  for (const e of sorted) {
+    if (e.type === 'ncns') {
+      current.push(e);
+    } else {
+      if (current.length >= 3) runs.push([...current]);
+      current = [];
+    }
+  }
+  if (current.length >= 3) runs.push([...current]);
+
+  // Use the most recent qualifying run
+  const consecRun = runs.length > 0 ? runs[runs.length - 1] : null;
+  const consecDates = new Set(consecRun ? consecRun.map(e => e.date) : []);
+
+  if (!consecRun) {
+    const totalNcns = sorted.filter(e => e.type === 'ncns').length;
+    alert('No sequence of 3 consecutive NCNS found.\n\nThis associate has ' + totalNcns + ' total NCNS on record, but they were not sequential — an attendance entry exists between them, breaking the streak.');
+    return;
+  }
+  const fmtDate    = iso => new Date(iso + 'T00:00:00').toLocaleDateString('en-US', { weekday:'long', month:'long', day:'numeric', year:'numeric' });
+  const fmtDateSh  = iso => new Date(iso + 'T00:00:00').toLocaleDateString('en-US', { month:'short', day:'numeric', year:'numeric' });
+  const issuedDate = new Date().toLocaleDateString('en-US', { month:'long', day:'numeric', year:'numeric' });
+  const resolvedId = currentAssociateId;
+  const eh = escapeHtml;
+  const aName = eh(assoc.name), aId = eh(assoc.employeeId||''), aRole = eh(assoc.role||''), aDept = eh(assoc.department||'LAS1 Operations');
+
+  const win = window.open('', '_blank', 'width=1000,height=850,scrollbars=yes,resizable=yes');
+  if (!win) { alert('Pop-ups are blocked. Please allow pop-ups for this page.'); return; }
+  win.document.write('<html><body style="font-family:Arial;padding:40px;color:#666;text-align:center"><p>Loading…</p></body></html>');
+
+  // Build full attendance log, newest→oldest, highlight the consecutive run
+  const displayEntries = [...sorted].reverse();
+  const ATYPE_LABELS = {};
+  (typeof ATTENDANCE_TYPES !== 'undefined' ? ATTENDANCE_TYPES : []).forEach(t => { ATYPE_LABELS[t.key] = t.label; });
+
+  const allRows = displayEntries.map((e, i) => {
+    const isHit   = consecDates.has(e.date) && e.type === 'ncns';
+    const rowBg   = isHit ? '#fff1f2' : (i % 2 === 0 ? '#fff' : '#fafafa');
+    const border  = isHit ? '1px solid #fca5a5' : '1px solid #e5e7eb';
+    const typeLabel = ATYPE_LABELS[e.type] || e.type || '—';
+    const pts = (e.points || 0) % 1 === 0 ? (e.points || 0) : Number(e.points || 0).toFixed(1);
+    const badge = isHit
+      ? '<span style="display:inline-block;background:#7c0000;color:#fff;font-size:7.5pt;font-weight:700;padding:2px 7px;border-radius:10px;margin-left:6px;vertical-align:middle">★ CONSECUTIVE</span>'
+      : '';
+    return '<tr style="background:' + rowBg + '">'
+      + '<td style="padding:7px 12px;border:' + border + ';font-size:9pt;white-space:nowrap">' + fmtDateSh(e.date) + '</td>'
+      + '<td style="padding:7px 12px;border:' + border + ';font-size:9pt;font-weight:' + (isHit?'700':'400') + ';color:' + (isHit?'#7c0000':'#374151') + '">'
+        + eh(typeLabel) + badge + '</td>'
+      + '<td style="padding:7px 12px;border:' + border + ';font-size:9pt;text-align:center;font-weight:' + (isHit?'700':'400') + ';color:' + (isHit?'#7c0000':'#374151') + '">'
+        + (pts > 0 ? '+' + pts : pts) + '</td>'
+      + '<td style="padding:7px 12px;border:' + border + ';font-size:8.5pt;color:#6b7280">' + eh(e.note||'') + '</td>'
+      + '</tr>';
+  }).join('');
+
+  const totalNcns = sorted.filter(e => e.type === 'ncns').length;
+  const totalPts  = sorted.reduce((s, e) => s + (e.points || 0), 0);
+  const runDates  = consecRun.map(e => fmtDate(e.date)).join('; ');
+
+  const saveScript = 'window.saveAndPrint=async function(){'
+    + 'var eC=document.getElementById("sig-employee"),mC=document.getElementById("sig-manager");'
+    + 'if(blank(eC)&&blank(mC)){alert("Please provide at least one signature before saving.");return;}'
+    + 'var ts=td(),sigs={};'
+    + '["employee","manager","witness"].forEach(function(role){'
+    + 'var c=document.getElementById("sig-"+role);if(!blank(c)){'
+    + 'sigs[role]=_d[role]||c.toDataURL("image/png");'
+    + 'document.getElementById("sigdate-"+role).textContent=ts;'
+    + 'document.getElementById("imgdata-"+role).src=sigs[role];'
+    + 'document.getElementById("img-"+role).style.display="block";'
+    + 'document.getElementById("wrap-"+role).style.display="none";}});'
+    + 'var st=document.getElementById("save-status"),ab=document.getElementById("action-bar");'
+    + 'st.style.display="block";st.style.color="#555";st.textContent="Saving to HR records…";'
+    + 'ab.style.display="none";st.style.display="none";'
+    + 'var dh="<!DOCTYPE html>"+document.documentElement.outerHTML;'
+    + 'ab.style.display="";st.style.display="block";'
+    + 'try{if(window.opener&&window.opener.saveSignedWarning){'
+    + 'await window.opener.saveSignedWarning({associateId:"' + resolvedId + '",associateName:"' + assoc.name.replace(/"/g,'\\"') + '",tier:"termination",tierLabel:"Job Abandonment",formType:"job-abandonment",formTypeLabel:"Job Abandonment — 3 Consecutive NCNS",points:0,signedAt:ts,signatures:sigs,documentHtml:dh});'
+    + 'st.style.color="#16a34a";st.innerHTML="✓ Saved to HR records.&nbsp;<button onclick=\\"window.print()\\" style=\\"padding:6px 18px;background:#1a2744;color:#fff;border:none;border-radius:4px;cursor:pointer\\">🖶️ Print</button>";'
+    + '}else{st.style.color="#d97706";st.innerHTML="⚠ Could not reach main app.&nbsp;<button onclick=\\"window.print()\\" style=\\"padding:6px 18px;background:#555;color:#fff;border:none;border-radius:4px;cursor:pointer\\">🖶️ Print</button>";}'
+    + '}catch(err){st.style.color="#dc2626";st.textContent="✗ Save failed: "+err.message;}};})();';
+
+  const html = '<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8">'
+    + '<title>Job Abandonment — ' + aName + '</title>'
+    + _GC_CSS + '</head>'
+    + '<body style="font-family:Arial,sans-serif;font-size:10.5pt;color:#111;background:#fff;">'
+    + '<div id="page-wrap">'
+    + '<div class="doc-title"><div style="font-size:8.5pt;color:#555;letter-spacing:2px;margin-bottom:4px">CarParts.com</div>'
+    + '<h1>Job Abandonment Notice</h1>'
+    + '<h2>3 Consecutive No Call / No Show — Employment Separation</h2></div>'
+    + '<table class="outer-table" style="margin-top:0">'
+    + '<tr><td colspan="4" class="sec-header">Employee Information</td></tr>'
+    + '<tr><td style="width:50%" class="field-cell"><div class="field-label">Employee Name :</div><div class="field-value" style="text-align:center">' + aName + '</div></td>'
+    + '<td style="width:50%" class="field-cell"><div class="field-label">Date :</div><div class="field-value" style="text-align:center">' + issuedDate + '</div></td></tr>'
+    + '<tr><td class="field-cell"><div class="field-label">Employee ID :</div><div class="field-value" style="text-align:center">' + aId + '</div></td>'
+    + '<td class="field-cell"><div class="field-label">Job Title :</div><div class="field-value" style="text-align:center">' + aRole + '</div></td></tr>'
+    + '<tr><td class="field-cell"><div class="field-label">Manager :</div><div class="field-value" style="text-align:center">Hector Marron</div></td>'
+    + '<td class="field-cell"><div class="field-label">Department :</div><div class="field-value" style="text-align:center">' + aDept + '</div></td></tr>'
+    + '<tr><td colspan="4" class="sec-header">Applicable Policy Reference</td></tr>'
+    + '<tr><td class="field-cell" style="width:18%;vertical-align:top"><div class="field-label">Section Code</div><div style="font-size:11pt;font-weight:700;color:#1a2744;margin-top:4px">§4.2 / §3.16</div></td>'
+    + '<td colspan="3" class="field-cell" style="vertical-align:top"><div class="field-label" style="margin-bottom:3px">Policy Description</div>'
+    + '<div style="font-size:9.5pt;line-height:1.5;color:#333">§4.2 (Attendance Policy) states that an associate who fails to report to work for three (3) consecutive scheduled days without notifying management will be considered to have voluntarily abandoned their position and will be subject to immediate separation. §3.16 (Progressive Discipline) identifies job abandonment as a terminal event that bypasses the progressive discipline structure.</div></td></tr>'
+    + '<tr><td colspan="4" class="sec-header">Full Attendance Record — Consecutive NCNS Highlighted</td></tr>'
+    + '<tr><td colspan="4" style="padding:0">'
+    + '<div style="padding:7px 12px;background:#fff1f2;border-bottom:1px solid #fca5a5;font-size:8.5pt;color:#7c0000;font-weight:600">'
+    + '★ Consecutive NCNS sequence (' + consecRun.length + ' days): ' + eh(runDates) + '</div>'
+    + '<table style="width:100%;border-collapse:collapse">'
+    + '<thead><tr style="background:#1a2744;color:#fff">'
+    + '<th style="padding:7px 12px;text-align:left;font-size:8.5pt;width:15%">Date</th>'
+    + '<th style="padding:7px 12px;text-align:left;font-size:8.5pt">Type</th>'
+    + '<th style="padding:7px 12px;text-align:center;font-size:8.5pt;width:8%">Pts</th>'
+    + '<th style="padding:7px 12px;text-align:left;font-size:8.5pt">Note</th>'
+    + '</tr></thead>'
+    + '<tbody>' + allRows + '</tbody>'
+    + '</table>'
+    + '<div style="padding:7px 12px;font-size:8.5pt;color:#555;border-top:1px solid #e5e7eb">Total NCNS on record: <strong>' + totalNcns + '</strong> &nbsp;|&nbsp; Overall attendance points: <strong>' + (totalPts%1===0?totalPts:totalPts.toFixed(1)) + '</strong> &nbsp;|&nbsp; Total entries: <strong>' + sorted.length + '</strong></div>'
+    + '</td></tr>'
+    + '<tr><td colspan="4" class="sec-header">Statement of Separation</td></tr>'
+    + '<tr><td colspan="4" style="padding:12px 16px;font-size:10pt;line-height:1.6;color:#111">'
+    + eh(assoc.name) + ' has failed to report to work or contact management for ' + consecRun.length + ' consecutive scheduled workdays ('
+    + eh(runDates) + '), with no attendance of any kind recorded between those dates. '
+    + 'Per CarParts.com policy §4.2, this constitutes voluntary job abandonment. Employment is considered separated effective the date of the first unreported absence in this series. '
+    + 'This document is being submitted to Human Resources to initiate the formal separation process.'
+    + '</td></tr>'
+    + '<tr><td colspan="4" class="sec-header">Acknowledgement</td></tr>'
+    + '<tr><td colspan="4" style="padding:6px 8px;font-size:9.5pt;color:#444">By signing, the manager certifies that the above information is accurate and that all reasonable attempts were made to contact the associate. A witness signature is required if the associate is unavailable or refuses to sign.</td></tr>'
+    + '<tr><td colspan="4" style="padding:0"><table class="sig-table"><tr>'
+    + _gcSigBox('employee','Employee Signature')
+    + _gcSigBox('manager','Manager Signature')
+    + _gcSigBox('witness','Witness Signature')
+    + '</tr></table></td></tr>'
+    + '</table>'
+    + '<div id="action-bar" style="text-align:center;margin-top:20px;display:flex;gap:12px;justify-content:center;flex-wrap:wrap">'
+    + '<button onclick="window.print()" style="padding:10px 28px;background:#555;color:#fff;border:none;border-radius:6px;font-size:10.5pt;cursor:pointer;font-weight:bold">🖶️ Print Unsigned Copy</button>'
+    + '<button onclick="saveAndPrint()" style="padding:10px 28px;background:#7c0000;color:#fff;border:none;border-radius:6px;font-size:10.5pt;cursor:pointer;font-weight:bold">✍️ Save &amp; Submit to HR</button>'
+    + '</div><div id="save-status" style="text-align:center;margin-top:10px;font-size:10pt;display:none"></div>'
+    + _GC_SIG_OVERLAY
+    + '<script>' + _GC_SIG_INIT + saveScript + '<\/script>'
+    + '</div></body></html>';
 
   win.document.open();
   win.document.write(html);
@@ -3646,7 +4532,7 @@ function renderTimeOff() {
   const mStart   = `${monthStr}-01`;
   const mEnd     = `${monthStr}-${String(new Date(_toYear, _toMonth+1, 0).getDate()).padStart(2,'0')}`;
   const assocF   = document.getElementById('toFilterAssoc')?.value || '';
-  const canEdit  = currentUserRole === 'admin' || currentUserRole === 'supervisor';
+  const canEdit  = roleAtLeast('supervisor');
 
   const rows = _allTimeOff.filter(e => {
     if (assocF && e.assocId !== assocF) return false;
@@ -3773,11 +4659,15 @@ window.saveTimeOff = async () => {
 };
 
 window.deleteTimeOff = async (assocId, entryId) => {
+  if (!roleAtLeast('admin')) return;
   if (!confirm('Remove this time off entry?')) return;
   await deleteDoc(doc(db, 'timeOff', assocId, 'entries', entryId));
   clearCache('todayTimeOff');
   clearCache('milestones_firestore');
   loadTimeOff();
+  // Rebuild the today map and re-render cards so banners update immediately
+  await loadTodayTimeOff();
+  renderCards();
 };
 
 // ─── Today's Attendance Stats (cached) ───────────────────────────────
@@ -3902,7 +4792,7 @@ window.openInBuildingList = () => {
     </tr></thead>
     <tbody>${rows || '<tr><td colspan="5" style="padding:16px;text-align:center;color:#9ca3af">No personnel currently in building.</td></tr>'}</tbody>
   </table>
-  <div class="footer">LAS1 Engagement Tracker &nbsp;·&nbsp; Emergency Roster &nbsp;·&nbsp; ${now}</div>
+  <div class="footer">Operational Health Tracker &nbsp;·&nbsp; Emergency Roster &nbsp;·&nbsp; ${now}</div>
   </body></html>`);
   win.document.close();
 };
@@ -3949,6 +4839,7 @@ window.logWarning = async (type) => {
 };
 
 window.deleteWarning = async (warningId) => {
+  if (!roleAtLeast('admin')) return;
   if (!confirm('Remove this warning record?')) return;
   await deleteDoc(doc(db, 'warnings', currentAssociateId, 'entries', warningId));
 };
@@ -3981,6 +4872,7 @@ window.saveAttendance = async () => {
 };
 
 window.deleteAttendance = async (entryId, type, pts) => {
+  if (!roleAtLeast('admin')) return;
   if (!confirm('Remove this attendance entry?')) return;
   await deleteDoc(doc(db, 'attendance', currentAssociateId, 'entries', entryId));
   await updateDoc(doc(db, 'associates', currentAssociateId), { attendancePoints: increment(-pts) });
@@ -4484,6 +5376,7 @@ function renderHRRecords(records) {
       <thead style="background:var(--navy);color:#fff">
         <tr>
           <th style="padding:10px 14px">Associate</th>
+          <th style="padding:10px 14px">Category</th>
           <th style="padding:10px 14px">Tier</th>
           <th style="padding:10px 14px;text-align:center">Points</th>
           <th style="padding:10px 14px">Date Signed</th>
@@ -4506,11 +5399,22 @@ function renderHRRecords(records) {
             : `<button onclick="logHRSubmission(${i})" style="display:inline-flex;align-items:center;gap:4px;background:#f0f9ff;border:1px solid #7dd3fc;border-radius:5px;padding:2px 7px;font-size:0.7rem;color:#0369a1;font-weight:600;cursor:pointer;margin-top:3px;" title="Log date submitted to HR">
                 <i class="fas fa-paper-plane"></i> Submit to HR
                </button>`;
+          // Category badge — attendance vs policy violation type
+          const isAttendance  = !r.formType || r.formType === 'attendance';
+          const isAbandonment = r.formType === 'job-abandonment';
+          const catType = GENERAL_CORRECTIVE_TYPES ? GENERAL_CORRECTIVE_TYPES.find(t => t.key === r.formType) : null;
+          const catLabel = isAbandonment ? 'Job Abandonment' : isAttendance ? 'Attendance' : (catType ? catType.short : (r.formTypeLabel || r.formType || 'Policy'));
+          const catSection = isAbandonment ? '§4.2 / §3.16' : catType ? catType.section : (isAttendance ? '§4.2' : '');
+          const catColor  = isAbandonment ? '#7c0000' : isAttendance ? '#0369a1' : '#7c3aed';
+          const catBg     = isAbandonment ? '#fee2e2'  : isAttendance ? '#e0f2fe' : '#ede9fe';
+          const catHtml   = `<div style="font-size:0.8rem;font-weight:600;color:${catColor}">${escapeHtml(catLabel)}</div>`
+            + (catSection ? `<div style="font-size:0.7rem;color:#6b7280">${escapeHtml(catSection)}</div>` : '');
           return `<tr>
             <td style="padding:10px 14px">
               <div style="font-weight:600;">${r.associateName || '—'}</div>
               ${submittedHtml}
             </td>
+            <td style="padding:10px 14px">${catHtml}</td>
             <td style="padding:10px 14px"><span style="color:${color};font-weight:600;font-size:0.82rem">${r.tierLabel || r.tier || '—'}</span></td>
             <td style="padding:10px 14px;text-align:center">${r.points ?? '—'}</td>
             <td style="padding:10px 14px;color:#555">${r.signedAt || '—'}</td>
@@ -4518,7 +5422,7 @@ function renderHRRecords(records) {
             <td style="padding:10px 14px;text-align:right">
               <button class="btn btn-sm btn-orange" onclick="viewHRRecord(${i})"><i class="fas fa-eye me-1"></i>View</button>
               <button class="btn btn-sm btn-outline-secondary ms-1" onclick="downloadHRRecord(${i})" title="Download as PDF"><i class="fas fa-file-pdf me-1"></i>PDF</button>
-              <button class="btn btn-sm btn-outline-danger ms-1" onclick="deleteHRRecord(${i})" title="Delete record"><i class="fas fa-trash"></i></button>
+              ${roleAtLeast('admin') ? `<button class="btn btn-sm btn-outline-danger ms-1" onclick="deleteHRRecord(${i})" title="Delete record"><i class="fas fa-trash"></i></button>` : ''}
             </td>
           </tr>`;
         }).join('')}
@@ -4665,6 +5569,7 @@ window.downloadHRRecord = async (idx) => {
 };
 
 window.deleteHRRecord = async (idx) => {
+  if (!roleAtLeast('admin')) return;
   const r = (window._hrRecords || [])[idx];
   if (!r) return;
   const name = r.associateName || 'this associate';
@@ -4786,6 +5691,35 @@ window.listenOneOnOnes = async (associateId) => {
       : '<div class="text-muted small">No 1:1 scheduled.</div>';
   }
 
+  // If this person is a leader, show 1:1s they are scheduled to conduct
+  const viewedAssoc = allAssociates.find(a => a.id === associateId);
+  const leaderPositions = new Set(['ops-manager','supervisor','lead']);
+  if (viewedAssoc && leaderPositions.has(viewedAssoc.position)) {
+    const myAssignments = allAssociates.filter(a =>
+      a.status === 'active' && a.next1on1 && a.next1on1ById === associateId
+    ).sort((a, b) => a.next1on1.localeCompare(b.next1on1));
+
+    const assignedEl = document.getElementById('oneOnOneAssigned');
+    if (assignedEl) {
+      if (myAssignments.length) {
+        assignedEl.innerHTML = '<div style="font-size:0.78rem;font-weight:700;color:#6366f1;text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px">Scheduled to Conduct</div>'
+          + myAssignments.map(a => {
+            const d = new Date(a.next1on1 + 'T00:00:00');
+            const diff = Math.round((d - new Date().setHours(0,0,0,0)) / (1000*60*60*24));
+            const when = diff < 0 ? '<span style="color:#dc2626">Overdue</span>' : diff === 0 ? '<span style="color:#16a34a">Today</span>' : diff === 1 ? 'Tomorrow' : 'In ' + diff + 'd';
+            return '<div style="display:flex;align-items:center;justify-content:space-between;padding:7px 10px;border:1px solid #e5e7eb;border-radius:7px;margin-bottom:5px;background:#f9fafb;cursor:pointer" onclick="openProfile(\'' + a.id + '\')">'
+              + '<div><div style="font-weight:600;font-size:0.85rem">' + escapeHtml(a.name) + '</div>'
+              + '<div style="font-size:0.75rem;color:#6b7280">' + d.toLocaleDateString('en-US',{weekday:'short',month:'short',day:'numeric'}) + ' · ' + when + '</div></div>'
+              + '<i class="fas fa-chevron-right" style="color:#9ca3af;font-size:0.75rem"></i></div>';
+          }).join('');
+        assignedEl.style.display = '';
+      } else {
+        assignedEl.innerHTML = '';
+        assignedEl.style.display = 'none';
+      }
+    }
+  }
+
   // Load completed 1:1 log
   try {
     const snap = await getDocs(collection(db, 'oneOnOnes', associateId, 'entries'));
@@ -4815,7 +5749,7 @@ function render1on1Log(entries) {
           <div style="font-weight:600;color:var(--navy);font-size:0.9rem"><i class="fas fa-comments me-1" style="color:#6366f1"></i>${formatDate(e.date)}</div>
           ${e.conductedBy ? `<div class="text-muted" style="font-size:0.78rem"><i class="fas fa-user me-1"></i>Conducted by: ${escapeHtml(e.conductedBy)}</div>` : ''}
         </div>
-        ${(currentUserRole === 'admin' || currentUserRole === 'supervisor') ? `<button class="btn btn-sm btn-outline-danger py-0 px-2" style="font-size:0.72rem" onclick="delete1on1('${e.id}')"><i class="fas fa-trash"></i></button>` : ''}
+        ${roleAtLeast('admin') ? `<button class="btn btn-sm btn-outline-danger py-0 px-2" style="font-size:0.72rem" onclick="delete1on1('${e.id}')"><i class="fas fa-trash"></i></button>` : ''}
       </div>
       ${e.topics ? `<div style="margin-top:6px;font-size:0.82rem"><span class="fw-semibold">Topics:</span> ${escapeHtml(e.topics)}</div>` : ''}
       ${e.notes ? `<div style="margin-top:4px;font-size:0.82rem;color:#374151">${escapeHtml(e.notes)}</div>` : ''}
@@ -4830,23 +5764,34 @@ window.open1on1Modal = (mode) => {
   const scheduleFields = document.getElementById('oneOnOneScheduleFields');
   const logFields = document.getElementById('oneOnOneLogFields');
 
+  // Build leader options (OMs, supervisors, leads) sorted by tier then name
+  const posOrder = { 'ops-manager': 0, 'supervisor': 1, 'lead': 2 };
+  const leaders = allAssociates
+    .filter(a => a.status === 'active' && (a.position === 'ops-manager' || a.position === 'supervisor' || a.position === 'lead'))
+    .sort((a, b) => (posOrder[a.position] ?? 9) - (posOrder[b.position] ?? 9) || a.name.localeCompare(b.name));
+  const posLabel = { 'ops-manager': 'OM', 'supervisor': 'Supervisor', 'lead': 'Lead' };
+  const leaderOptions = '<option value="">— Select leader —</option>'
+    + leaders.map(l => '<option value="' + l.id + '">' + escapeHtml(l.name) + ' (' + (posLabel[l.position] || l.position) + ')</option>').join('');
+
+  const selSchedule = document.getElementById('1on1Conductor');
+  const selLog      = document.getElementById('1on1LogConductor');
+  selSchedule.innerHTML = leaderOptions;
+  selLog.innerHTML      = leaderOptions;
+
+  const assoc = allAssociates.find(a => a.id === currentAssociateId);
+
   if (mode === 'schedule') {
     title.textContent = 'Schedule 1:1';
     scheduleFields.classList.remove('d-none');
     logFields.classList.add('d-none');
-    // Pre-fill if already scheduled
-    const assoc = allAssociates.find(a => a.id === currentAssociateId);
     document.getElementById('1on1Date').value = assoc?.next1on1 || '';
-    document.getElementById('1on1Conductor').value = assoc?.next1on1By || '';
+    selSchedule.value = assoc?.next1on1ById || '';
   } else {
     title.textContent = 'Log Completed 1:1';
     scheduleFields.classList.add('d-none');
     logFields.classList.remove('d-none');
-    // Pre-fill date with today, conductor with scheduled conductor if available
-    const today = localToday();
-    const assoc = allAssociates.find(a => a.id === currentAssociateId);
-    document.getElementById('1on1LogDate').value = assoc?.next1on1 || today;
-    document.getElementById('1on1LogConductor').value = assoc?.next1on1By || '';
+    document.getElementById('1on1LogDate').value = assoc?.next1on1 || localToday();
+    selLog.value = assoc?.next1on1ById || '';
     document.getElementById('1on1Topics').value = '';
     document.getElementById('1on1Notes').value = '';
     document.getElementById('1on1FollowUps').value = '';
@@ -4861,26 +5806,28 @@ window.save1on1 = async () => {
 
   if (_1on1Mode === 'schedule') {
     const date = document.getElementById('1on1Date').value;
-    const conductor = document.getElementById('1on1Conductor').value.trim();
+    const conductorId = document.getElementById('1on1Conductor').value;
+    const conductorAssoc = allAssociates.find(a => a.id === conductorId);
+    const conductorName = conductorAssoc ? conductorAssoc.name : '';
     if (!date) { alert('Please select a date.'); return; }
-    await updateDoc(doc(db, 'associates', assocId), { next1on1: date, next1on1By: conductor || '' });
-    // Update local cache
+    await updateDoc(doc(db, 'associates', assocId), { next1on1: date, next1on1By: conductorName, next1on1ById: conductorId });
     const assoc = allAssociates.find(a => a.id === assocId);
-    if (assoc) { assoc.next1on1 = date; assoc.next1on1By = conductor; }
+    if (assoc) { assoc.next1on1 = date; assoc.next1on1By = conductorName; assoc.next1on1ById = conductorId; }
   } else {
     const date = document.getElementById('1on1LogDate').value;
-    const conductor = document.getElementById('1on1LogConductor').value.trim();
+    const conductorId = document.getElementById('1on1LogConductor').value;
+    const conductorAssoc = allAssociates.find(a => a.id === conductorId);
+    const conductorName = conductorAssoc ? conductorAssoc.name : '';
     const topics = document.getElementById('1on1Topics').value.trim();
     const notes = document.getElementById('1on1Notes').value.trim();
     const followUps = document.getElementById('1on1FollowUps').value.trim();
     if (!date) { alert('Please enter the meeting date.'); return; }
-    const entry = { date, conductedBy: conductor, topics, notes, followUps, createdAt: new Date().toISOString() };
+    const entry = { date, conductedBy: conductorName, conductedById: conductorId, topics, notes, followUps, createdAt: new Date().toISOString() };
     Object.keys(entry).forEach(k => { if (!entry[k]) delete entry[k]; });
     await addDoc(collection(db, 'oneOnOnes', assocId, 'entries'), entry);
-    // Clear the scheduled 1:1 from the associate doc after logging
-    await updateDoc(doc(db, 'associates', assocId), { next1on1: '', next1on1By: '' });
+    await updateDoc(doc(db, 'associates', assocId), { next1on1: '', next1on1By: '', next1on1ById: '' });
     const assoc = allAssociates.find(a => a.id === assocId);
-    if (assoc) { assoc.next1on1 = ''; assoc.next1on1By = ''; }
+    if (assoc) { assoc.next1on1 = ''; assoc.next1on1By = ''; assoc.next1on1ById = ''; }
   }
 
   bootstrap.Modal.getInstance(document.getElementById('oneOnOneModal')).hide();
@@ -4899,6 +5846,7 @@ window.clearScheduled1on1 = async () => {
 };
 
 window.delete1on1 = async (entryId) => {
+  if (!roleAtLeast('admin')) return;
   if (!confirm('Delete this 1:1 record?')) return;
   await deleteDoc(doc(db, 'oneOnOnes', currentAssociateId, 'entries', entryId));
   window._1on1Entries = (window._1on1Entries || []).filter(e => e.id !== entryId);
@@ -4919,6 +5867,10 @@ window.toggle1on1Panel = () => {
 window.loadAdminPanel = () => {
   showView('admin');
   detachAll();
+  // Hide admin-only sections from OM
+  document.querySelectorAll('.admin-only-section').forEach(el => {
+    el.classList.toggle('d-none', !roleAtLeast('admin'));
+  });
 
   activeListeners['users'] = onSnapshot(collection(db, 'users'), (snap) => {
     const tbody = document.getElementById('usersTbody');
@@ -4927,7 +5879,7 @@ window.loadAdminPanel = () => {
     tbody.innerHTML = users.map(u => `<tr>
       <td class="fw-semibold">${escapeHtml(u.displayName || '—')}</td>
       <td class="text-muted small">${escapeHtml(u.email || '—')}</td>
-      <td><span class="badge ${u.role === 'admin' ? 'bg-danger' : u.role === 'supervisor' ? 'bg-primary' : u.role === 'lead' ? 'bg-success' : 'bg-secondary'}">${capitalize(u.role || 'viewer')}</span></td>
+      <td><span class="badge ${u.role === 'admin' ? 'bg-danger' : u.role === 'om' ? 'bg-warning text-dark' : u.role === 'supervisor' ? 'bg-primary' : u.role === 'lead' ? 'bg-success' : 'bg-secondary'}">${u.role === 'om' ? 'OM' : capitalize(u.role || 'viewer')}</span></td>
       <td>
         <div class="d-flex align-items-center gap-1">
           ${u._pw ? `
@@ -4943,6 +5895,7 @@ window.loadAdminPanel = () => {
           <option value="viewer"     ${(u.role||'viewer')==='viewer'     ? 'selected' : ''}>Viewer</option>
           <option value="lead"       ${(u.role||'viewer')==='lead'       ? 'selected' : ''}>Lead</option>
           <option value="supervisor" ${(u.role||'viewer')==='supervisor' ? 'selected' : ''}>Supervisor</option>
+          <option value="om"         ${(u.role||'viewer')==='om'         ? 'selected' : ''}>OM</option>
           <option value="admin"      ${(u.role||'viewer')==='admin'      ? 'selected' : ''}>Admin</option>
         </select>
         ${u.uid !== currentUser?.uid ? `<button class="btn btn-sm btn-outline-danger py-0" onclick="removeUser('${u.uid}')"><i class="fas fa-trash-alt"></i></button>` : ''}
@@ -5009,7 +5962,7 @@ async function loadLoginLog() {
   try {
     const snap = await getDocs(query(collection(db, 'loginLog'), orderBy('loginAt', 'desc'), limit(15)));
     if (snap.empty) { container.innerHTML = '<p class="text-muted small mb-0">No logins recorded yet.</p>'; return; }
-    const roleColor = { admin: '#dc2626', supervisor: '#2563eb', lead: '#16a34a', viewer: '#6b7280' };
+    const roleColor = { admin: '#dc2626', om: '#d97706', supervisor: '#2563eb', lead: '#16a34a', viewer: '#6b7280' };
     container.innerHTML = snap.docs.map(d => {
       const e = d.data();
       const dt = e.loginAt ? new Date(e.loginAt) : null;
@@ -6201,7 +7154,7 @@ async function _kbRefreshBoard() {
 }
 
 function _kbRenderBoard() {
-  const canEdit = currentUserRole === 'admin' || currentUserRole === 'supervisor' || currentUserRole === 'lead';
+  const canEdit = roleAtLeast('lead');
   const board = document.getElementById('kbBoard');
 
   board.innerHTML = KB_COLS.map(col => {
@@ -6596,6 +7549,18 @@ body { background:#f4f6fb; font-family:'Segoe UI',sans-serif; margin:0; }
 .watch-category-badge { display:inline-block; background:#fef3c7; color:#92400e; border-radius:20px; padding:2px 10px; font-size:0.73rem; font-weight:600; margin-bottom:0.4rem; }
 .watch-note-text { color:#374151; font-size:0.875rem; line-height:1.6; white-space:pre-wrap; margin-bottom:0.35rem; }
 .watch-note-meta { font-size:0.72rem; color:#9ca3af; }
+
+/* Goals & Development */
+.goal-card { background:#f8fafc; border-radius:8px; padding:0.75rem 1rem; margin-bottom:0.6rem; }
+.goal-category-badge { display:inline-block; background:#dbeafe; color:#1d4ed8; border-radius:20px; padding:1px 8px; font-size:0.7rem; font-weight:600; }
+.goal-status-badge { display:inline-block; border-radius:20px; padding:1px 8px; font-size:0.7rem; font-weight:600; }
+.goal-title { color:#1e293b; font-size:0.875rem; line-height:1.5; font-weight:600; }
+.goal-meta { font-size:0.7rem; color:#94a3b8; }
+#goalsChevron.open { transform:rotate(180deg); }
+.goal-progress-area { padding-top:0.6rem; }
+.progress-note-entry { background:#f1f5f9; border-radius:6px; padding:0.35rem 0.6rem; margin-bottom:0.35rem; border-left:3px solid #cbd5e1; }
+.progress-note-date { font-size:0.67rem; color:#94a3b8; }
+.progress-note-text { font-size:0.78rem; color:#1e293b; white-space:pre-wrap; margin-top:2px; line-height:1.4; }
 
 /* Leadership panel */
 .leadership-panel { background:linear-gradient(135deg,#1a2744 0%,#2d3f6b 100%); border-radius:14px; padding:1.25rem 1.5rem; }
@@ -7023,7 +7988,7 @@ body { background:#f4f6fb; font-family:'Segoe UI',sans-serif; margin:0; }
   <!-- Sidebar -->
   <nav id="sidebar">
     <div class="sidebar-brand">
-      <div class="brand-name">LAS1 Engagement Tracker</div>
+      <div class="brand-name">Operational Health Tracker</div>
       <div class="brand-sub">Performance Intelligence</div>
     </div>
     <div class="sidebar-nav">
@@ -7044,6 +8009,9 @@ body { background:#f4f6fb; font-family:'Segoe UI',sans-serif; margin:0; }
       </a>
       <a class="nav-link" data-view="hrrecords" onclick="loadHRRecords()">
         <i class="fas fa-file-signature"></i><span>HR Records</span>
+      </a>
+      <a class="nav-link" data-view="turnover" onclick="loadTurnover()">
+        <i class="fas fa-door-open"></i><span>Turnover</span>
       </a>
       <a class="nav-link d-none" id="navAdmin" data-view="admin" onclick="loadAdminPanel()">
         <i class="fas fa-shield-alt"></i><span>Admin</span>
@@ -7281,6 +8249,10 @@ body { background:#f4f6fb; font-family:'Segoe UI',sans-serif; margin:0; }
             <span style="font-size:1rem;font-weight:700">Daily Board</span>
             <span class="kb-count d-none" id="kb-count-profile" style="margin-top:2px;font-size:1rem;padding:4px 16px">—</span>
           </button>
+          <button class="kanban-btn d-none" id="profileCorrectiveBtn" onclick="openCorrectivePicker()" style="flex-direction:column;align-items:center;justify-content:center;gap:6px;border-radius:14px;padding:20px 22px;min-width:130px;align-self:stretch;background:rgba(220,38,38,0.13);border:1.5px solid rgba(220,38,38,0.35)">
+            <i class="fas fa-file-alt" style="font-size:2rem;margin-bottom:2px;color:#fca5a5"></i>
+            <span style="font-size:0.88rem;font-weight:700;color:#fca5a5;text-align:center;line-height:1.2">Issue<br>Corrective</span>
+          </button>
         </div>
       </div>
 
@@ -7299,6 +8271,26 @@ body { background:#f4f6fb; font-family:'Segoe UI',sans-serif; margin:0; }
         </h6>
         <div class="chips-row" id="certsContainer">
           <span class="text-muted small">Loading…</span>
+        </div>
+      </div>
+
+      <!-- Goals / Development Plan -->
+      <div class="mt-4" id="goalsSection">
+        <div style="border:1px solid #bfdbfe;border-radius:10px;overflow:hidden">
+          <div class="d-flex align-items-center justify-content-between" style="background:linear-gradient(90deg,#eff6ff 0%,#f0f9ff 100%);padding:12px 16px;cursor:pointer" onclick="toggleGoalsPanel()">
+            <div class="d-flex align-items-center gap-2">
+              <i class="fas fa-bullseye" style="color:#2563eb;font-size:0.9rem"></i>
+              <span class="fw-bold" style="color:#1d4ed8">Goals & Development</span>
+              <span class="badge ms-1" style="background:#dbeafe;color:#1d4ed8;font-size:0.7rem" id="goalCountBadge">0</span>
+            </div>
+            <div class="d-flex align-items-center gap-2">
+              <button class="btn btn-sm" style="display:none;background:#2563eb;color:#fff;border:none;font-size:0.78rem;padding:2px 10px" id="goalsAddBtn" onclick="event.stopPropagation();openAddGoalModal()"><i class="fas fa-plus me-1"></i>Add Goal</button>
+              <i class="fas fa-chevron-down" id="goalsChevron" style="color:#2563eb;transition:transform 0.2s"></i>
+            </div>
+          </div>
+          <div id="goalsBody" class="d-none" style="padding:14px 16px 16px">
+            <div id="goalsContainer"></div>
+          </div>
         </div>
       </div>
 
@@ -7392,6 +8384,7 @@ body { background:#f4f6fb; font-family:'Segoe UI',sans-serif; margin:0; }
           </div>
           <div id="oneOnOneBody" class="d-none" style="padding:14px 16px 16px">
             <div id="oneOnOneScheduled" class="mb-3"></div>
+            <div id="oneOnOneAssigned" class="mb-3" style="display:none"></div>
             <div style="font-size:0.78rem;font-weight:600;color:#6b7280;text-transform:uppercase;letter-spacing:0.04em;margin-bottom:6px">Meeting History</div>
             <div id="oneOnOneContainer"></div>
           </div>
@@ -7820,19 +8813,19 @@ body { background:#f4f6fb; font-family:'Segoe UI',sans-serif; margin:0; }
           <div class="admin-card">
             <h6 class="fw-bold mb-3" style="color:var(--navy)"><i class="fas fa-shield-alt me-2" style="color:var(--orange)"></i>Roles & Permissions</h6>
             <table class="table table-sm small mb-0">
-              <thead class="table-light"><tr><th>Action</th><th>Viewer</th><th>Lead</th><th>Supervisor</th><th>Admin</th></tr></thead>
+              <thead class="table-light"><tr><th>Action</th><th>Viewer</th><th>Lead</th><th>Supervisor</th><th>OM</th><th>Admin</th></tr></thead>
               <tbody>
-                <tr><td>View profiles & notes</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td></tr>
-                <tr><td>Add notes, toggle certs, log attendance</td><td></td><td>✓</td><td>✓</td><td>✓</td></tr>
-                <tr><td>Nominate badges</td><td></td><td>✓</td><td>✓</td><td>✓</td></tr>
-                <tr><td>View & add credentials</td><td></td><td>✓</td><td>✓</td><td>✓</td></tr>
-                <tr><td>Schedule 1:1 meetings, manage time off</td><td></td><td>✓</td><td>✓</td><td>✓</td></tr>
-                <tr><td>Delete notes</td><td></td><td></td><td>✓</td><td>✓</td></tr>
-                <tr><td>View private watch notes</td><td></td><td></td><td>✓</td><td>✓</td></tr>
-                <tr><td>Approve/reject badges</td><td></td><td></td><td></td><td>✓</td></tr>
-                <tr><td>Delete credentials</td><td></td><td></td><td></td><td>✓</td></tr>
-                <tr><td>Grant associate portal access</td><td></td><td></td><td></td><td>✓</td></tr>
-                <tr><td>Manage user accounts</td><td></td><td></td><td></td><td>✓</td></tr>
+                <tr><td>View profiles & notes</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td></tr>
+                <tr><td>Add notes, toggle certs, log attendance</td><td></td><td>✓</td><td>✓</td><td>✓</td><td>✓</td></tr>
+                <tr><td>Nominate badges</td><td></td><td>✓</td><td>✓</td><td>✓</td><td>✓</td></tr>
+                <tr><td>View & add credentials</td><td></td><td>✓</td><td>✓</td><td>✓</td><td>✓</td></tr>
+                <tr><td>Schedule 1:1 meetings, manage time off</td><td></td><td></td><td>✓</td><td>✓</td><td>✓</td></tr>
+                <tr><td>Delete notes</td><td></td><td></td><td>✓</td><td>✓</td><td>✓</td></tr>
+                <tr><td>View private watch notes</td><td></td><td></td><td></td><td>✓</td><td>✓</td></tr>
+                <tr><td>Approve/reject badges</td><td></td><td></td><td></td><td>✓</td><td>✓</td></tr>
+                <tr><td>Delete credentials</td><td></td><td></td><td></td><td>✓</td><td>✓</td></tr>
+                <tr><td>Grant associate portal access</td><td></td><td></td><td></td><td></td><td>✓</td></tr>
+                <tr><td>Manage user accounts</td><td></td><td></td><td></td><td></td><td>✓</td></tr>
               </tbody>
             </table>
           </div>
@@ -7999,15 +8992,27 @@ body { background:#f4f6fb; font-family:'Segoe UI',sans-serif; margin:0; }
       </div>
     </div>
 
+    <!-- TURNOVER VIEW -->
+    <div id="turnoverView" class="view d-none">
+      <div class="d-flex justify-content-between align-items-center mb-4 flex-wrap gap-2">
+        <h1 class="page-title"><i class="fas fa-door-open me-2" style="color:var(--orange)"></i>Turnover Tracker</h1>
+        <div class="d-flex gap-2">
+          <button class="btn btn-sm" id="turnBtn6" style="background:var(--navy);color:#fff;border:none" onclick="window._turnoverPeriod=6;document.getElementById('turnBtn6').style.background='var(--orange)';document.getElementById('turnBtn12').style.background='var(--navy)';renderTurnoverView()">Last 6 Months</button>
+          <button class="btn btn-sm" id="turnBtn12" style="background:var(--orange);color:#fff;border:none" onclick="window._turnoverPeriod=12;document.getElementById('turnBtn12').style.background='var(--orange)';document.getElementById('turnBtn6').style.background='var(--navy)';renderTurnoverView()">Last 12 Months</button>
+        </div>
+      </div>
+      <div id="turnoverContent"></div>
+    </div>
+
     <!-- ADMIN VIEW -->
     <div id="adminView" class="view d-none">
       <div class="d-flex justify-content-between align-items-center mb-4 flex-wrap gap-2">
         <h1 class="page-title"><i class="fas fa-shield-alt me-2" style="color:var(--orange)"></i>Admin Panel</h1>
-        <button class="btn btn-sm btn-orange" onclick="openCreateUser()"><i class="fas fa-user-plus me-1"></i>Create Account</button>
+        <button class="btn btn-sm btn-orange admin-only-section" onclick="openCreateUser()"><i class="fas fa-user-plus me-1"></i>Create Account</button>
       </div>
 
       <!-- Tab Visibility -->
-      <div class="admin-card mb-4">
+      <div class="admin-card mb-4 admin-only-section">
         <div class="d-flex justify-content-between align-items-center mb-3">
           <h6 class="fw-bold mb-0" style="color:var(--navy)"><i class="fas fa-eye me-2" style="color:var(--orange)"></i>Tab Visibility <span class="text-muted fw-normal small">(admin always sees all)</span></h6>
         </div>
@@ -8073,7 +9078,7 @@ body { background:#f4f6fb; font-family:'Segoe UI',sans-serif; margin:0; }
       </div>
 
       <!-- Associate Portal Access -->
-      <div class="admin-card mb-4">
+      <div class="admin-card mb-4 admin-only-section">
         <div class="d-flex justify-content-between align-items-center mb-3">
           <h6 class="fw-bold mb-0" style="color:var(--navy)"><i class="fas fa-mobile-alt me-2" style="color:#7c3aed"></i>Associate Portal Access</h6>
           <button class="btn btn-sm btn-outline-secondary py-0" onclick="loadPendingAccessRequests()"><i class="fas fa-sync-alt"></i></button>
@@ -8101,7 +9106,7 @@ body { background:#f4f6fb; font-family:'Segoe UI',sans-serif; margin:0; }
       </div>
 
       <!-- Data Management -->
-      <div class="admin-card" style="border-left:4px solid #dc2626">
+      <div class="admin-card admin-only-section" style="border-left:4px solid #dc2626">
         <div class="d-flex justify-content-between align-items-center mb-3">
           <h6 class="fw-bold mb-0" style="color:var(--navy)"><i class="fas fa-database me-2" style="color:#dc2626"></i>Data Management — Engagement Points</h6>
           <button class="btn btn-sm btn-outline-danger" id="resetAllPtsBtn" onclick="resetAllEngagementPoints()">
@@ -8173,7 +9178,7 @@ body { background:#f4f6fb; font-family:'Segoe UI',sans-serif; margin:0; }
       </div>
 
       <!-- Run Expiry Check -->
-      <div class="admin-card" style="border-left:4px solid #16a34a">
+      <div class="admin-card admin-only-section" style="border-left:4px solid #16a34a">
         <div class="d-flex justify-content-between align-items-center mb-2">
           <div>
             <h6 class="fw-bold mb-0" style="color:var(--navy)"><i class="fas fa-clock me-2" style="color:#16a34a"></i>Run Expiry Check Now</h6>
@@ -8187,7 +9192,7 @@ body { background:#f4f6fb; font-family:'Segoe UI',sans-serif; margin:0; }
       </div>
 
       <!-- Expiry Diagnostics -->
-      <div class="admin-card" style="border-left:4px solid #0891b2">
+      <div class="admin-card admin-only-section" style="border-left:4px solid #0891b2">
         <div class="d-flex justify-content-between align-items-center mb-2">
           <div>
             <h6 class="fw-bold mb-0" style="color:var(--navy)"><i class="fas fa-stethoscope me-2" style="color:#0891b2"></i>Expiry Diagnostics</h6>
@@ -8268,7 +9273,7 @@ body { background:#f4f6fb; font-family:'Segoe UI',sans-serif; margin:0; }
       </div>
 
       <!-- User Management -->
-      <div class="admin-card">
+      <div class="admin-card admin-only-section">
         <h6 class="fw-bold mb-3" style="color:var(--navy)">Team Accounts</h6>
         <div class="table-responsive">
           <table class="table table-hover small mb-0">
@@ -8332,8 +9337,9 @@ body { background:#f4f6fb; font-family:'Segoe UI',sans-serif; margin:0; }
           <select class="form-select" id="newRole">
             <option value="viewer">Viewer — read only</option>
             <option value="lead" selected>Lead — add notes, certs, nominate badges, view/add credentials</option>
-            <option value="supervisor">Supervisor — Lead access + private watch notes + delete notes</option>
-            <option value="admin">Admin — full access + user management + badge approvals</option>
+            <option value="supervisor">Supervisor — Lead access + schedule 1:1s, manage time off, delete notes</option>
+            <option value="om">OM — Supervisor access + watch notes, approve/reject badges, delete credentials</option>
+            <option value="admin">Admin — full access + user management + portal access + data management</option>
           </select>
         </div>
       </form>
@@ -8713,7 +9719,9 @@ body { background:#f4f6fb; font-family:'Segoe UI',sans-serif; margin:0; }
           </div>
           <div class="mb-2">
             <label class="form-label fw-semibold small">Conducted by</label>
-            <input type="text" class="form-control" id="1on1Conductor" placeholder="e.g. Hector Marron">
+            <select class="form-select" id="1on1Conductor">
+              <option value="">— Select leader —</option>
+            </select>
             <div class="form-text">Who will be conducting this 1:1?</div>
           </div>
         </div>
@@ -8726,7 +9734,9 @@ body { background:#f4f6fb; font-family:'Segoe UI',sans-serif; margin:0; }
           </div>
           <div class="mb-3">
             <label class="form-label fw-semibold small">Conducted by</label>
-            <input type="text" class="form-control" id="1on1LogConductor" placeholder="e.g. Hector Marron">
+            <select class="form-select" id="1on1LogConductor">
+              <option value="">— Select leader —</option>
+            </select>
           </div>
           <div class="mb-3">
             <label class="form-label fw-semibold small">Topics Covered</label>
@@ -8843,6 +9853,202 @@ body { background:#f4f6fb; font-family:'Segoe UI',sans-serif; margin:0; }
     </div>
   </div>
 </div>
+
+<!-- Goal Modal -->
+<div class="modal fade" id="goalModal" tabindex="-1">
+  <div class="modal-dialog modal-dialog-centered">
+    <div class="modal-content">
+      <div class="modal-header border-0 pb-0" style="background:linear-gradient(135deg,#1d4ed8 0%,#2563eb 100%);border-radius:0.5rem 0.5rem 0 0">
+        <h5 class="modal-title fw-bold text-white"><i class="fas fa-bullseye me-2"></i>Add Goal</h5>
+        <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body pt-4">
+        <form id="goalForm">
+          <input type="hidden" id="goalEditId">
+          <div class="mb-3">
+            <label class="form-label fw-semibold small">Goal Description <span class="text-danger">*</span></label>
+            <textarea class="form-control" id="goalTitle" rows="2" placeholder="e.g. Earn Jackpot certification, Reduce tardies to zero…"></textarea>
+          </div>
+          <div class="row g-3 mb-3">
+            <div class="col-6">
+              <label class="form-label fw-semibold small">Category</label>
+              <select class="form-select" id="goalCategory">
+                <option value="30-Day">30-Day Target</option>
+                <option value="60-Day">60-Day Target</option>
+                <option value="90-Day">90-Day Target</option>
+                <option value="Long-Term">Long-Term</option>
+                <option value="General">General</option>
+              </select>
+            </div>
+            <div class="col-6">
+              <label class="form-label fw-semibold small">Due Date</label>
+              <input type="date" class="form-control" id="goalDueDate">
+            </div>
+          </div>
+          <div class="mb-1">
+            <label class="form-label fw-semibold small">Notes / Action Plan</label>
+            <textarea class="form-control" id="goalNotes" rows="3" placeholder="Steps, context, or success criteria…"></textarea>
+          </div>
+        </form>
+      </div>
+      <div class="modal-footer border-0 pt-0">
+        <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancel</button>
+        <button type="button" class="btn text-white fw-semibold" id="saveGoalBtn" style="background:#2563eb;border:none" onclick="saveGoal()">
+          <i class="fas fa-save me-1"></i>Save Goal
+        </button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Exit Modal -->
+<div class="modal fade" id="exitModal" tabindex="-1">
+  <div class="modal-dialog modal-dialog-centered">
+    <div class="modal-content">
+      <div class="modal-header border-0 pb-0" style="background:linear-gradient(135deg,#1e293b 0%,#334155 100%);border-radius:0.5rem 0.5rem 0 0">
+        <h5 class="modal-title fw-bold text-white"><i class="fas fa-door-open me-2"></i>Record Separation</h5>
+        <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body pt-4">
+        <p class="text-muted small mb-3">This associate is being marked as separated. Fill in the exit details before saving.</p>
+        <div class="mb-3">
+          <label class="form-label fw-semibold small">Exit Reason <span class="text-danger">*</span></label>
+          <select class="form-select" id="exitReason">
+            <option value="Resigned">Resigned</option>
+            <option value="Terminated">Terminated</option>
+          </select>
+        </div>
+        <div class="mb-3">
+          <label class="form-label fw-semibold small">Last Day Worked</label>
+          <input type="date" class="form-control" id="exitLastDay">
+        </div>
+        <div class="mb-1">
+          <label class="form-label fw-semibold small">Notes</label>
+          <textarea class="form-control" id="exitNotes" rows="3" placeholder="Optional — reason, circumstances, eligible for rehire, etc."></textarea>
+        </div>
+      </div>
+      <div class="modal-footer border-0 pt-0">
+        <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancel</button>
+        <button type="button" class="btn text-white fw-semibold" id="confirmExitBtn" style="background:#1e293b;border:none" onclick="confirmExit()">
+          <i class="fas fa-save me-1"></i>Save Separation
+        </button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Edit Separation Modal -->
+<div class="modal fade" id="editSeparationModal" tabindex="-1">
+  <div class="modal-dialog modal-dialog-centered">
+    <div class="modal-content">
+      <div class="modal-header border-0 pb-0" style="background:linear-gradient(135deg,#1e293b 0%,#334155 100%);border-radius:0.5rem 0.5rem 0 0">
+        <h5 class="modal-title fw-bold text-white"><i class="fas fa-pencil-alt me-2"></i>Edit Separation Record</h5>
+        <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body pt-4">
+        <input type="hidden" id="editSepAssocId">
+        <div class="mb-3">
+          <label class="form-label fw-semibold small text-muted">Associate</label>
+          <div class="fw-bold" id="editSepName" style="color:var(--navy)"></div>
+        </div>
+        <div class="mb-3">
+          <label class="form-label fw-semibold small">Exit Reason</label>
+          <select class="form-select" id="editSepReason">
+            <option value="Resigned">Resigned</option>
+            <option value="Terminated">Terminated</option>
+          </select>
+        </div>
+        <div class="mb-3">
+          <label class="form-label fw-semibold small">Last Day Worked</label>
+          <input type="date" class="form-control" id="editSepLastDay">
+        </div>
+        <div class="mb-1">
+          <label class="form-label fw-semibold small">Notes</label>
+          <textarea class="form-control" id="editSepNotes" rows="3" placeholder="Reason, circumstances, eligible for rehire, etc."></textarea>
+        </div>
+      </div>
+      <div class="modal-footer border-0 pt-0">
+        <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancel</button>
+        <button type="button" class="btn text-white fw-semibold" id="saveEditSepBtn" style="background:#1e293b;border:none" onclick="saveEditSeparation()">
+          <i class="fas fa-save me-1"></i>Save Changes
+        </button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ═══ Corrective Action Picker Modal ═══════════════════════════════════ -->
+<div class="modal fade" id="correctivePickerModal" tabindex="-1">
+  <div class="modal-dialog modal-lg modal-dialog-centered modal-dialog-scrollable">
+    <div class="modal-content border-0 shadow-lg">
+      <div class="modal-header border-0 pb-2" style="background:#1a2744;border-radius:12px 12px 0 0">
+        <h5 class="modal-title text-white fw-bold"><i class="fas fa-file-alt me-2"></i>Issue Employee Warning Notice</h5>
+        <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body" style="background:#1a2744;border-radius:0 0 12px 12px;padding:14px 20px 22px">
+        <p class="text-white-50 small mb-3">Select the type of warning to issue for the current associate.</p>
+        <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:10px" id="correctivePickerGrid">
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ═══ Issue Corrective Form Modal ════════════════════════════════════════ -->
+<div class="modal fade" id="issueCorrectiveModal" tabindex="-1">
+  <div class="modal-dialog modal-lg modal-dialog-centered modal-dialog-scrollable">
+    <div class="modal-content border-0 shadow-lg">
+      <div class="modal-header border-0" style="background:#1a2744;border-radius:12px 12px 0 0">
+        <div>
+          <h5 class="modal-title text-white fw-bold mb-0" id="gcFormTitle">Employee Warning Notice</h5>
+          <div class="text-white-50 small mt-1">Fill in the details — the form will open in a new window for signing and printing.</div>
+        </div>
+        <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body" style="padding:20px 24px">
+        <input type="hidden" id="gcTypeKey">
+        <div class="row g-3 mb-3">
+          <div class="col-6">
+            <label class="form-label fw-semibold small">Warning Level</label>
+            <select class="form-select" id="gcTier" onchange="gcUpdateTierDefaults()">
+              <option value="verbal">Verbal Warning</option>
+              <option value="written">First Written Warning</option>
+              <option value="final">Final Warning</option>
+              <option value="termination">Termination</option>
+            </select>
+          </div>
+          <div class="col-6">
+            <label class="form-label fw-semibold small">Date of Incident</label>
+            <input type="date" class="form-control" id="gcIncidentDate">
+          </div>
+        </div>
+        <div class="mb-3">
+          <label class="form-label fw-semibold small">Description of Incident <span class="text-danger">*</span></label>
+          <textarea class="form-control" id="gcDescription" rows="4" placeholder="Describe what happened — specific behavior, time, location, who was present, impact to operations or team..."></textarea>
+        </div>
+        <div class="mb-3">
+          <label class="form-label fw-semibold small">Prior History <span class="text-muted fw-normal">(optional)</span></label>
+          <textarea class="form-control" id="gcPriorHistory" rows="2" placeholder="Note any prior coaching, verbal warnings, or related incidents on file..."></textarea>
+        </div>
+        <div class="mb-3">
+          <label class="form-label fw-semibold small">Action Taken</label>
+          <textarea class="form-control" id="gcActionTaken" rows="3"></textarea>
+        </div>
+        <div class="mb-1">
+          <label class="form-label fw-semibold small">Plan for Improvement</label>
+          <textarea class="form-control" id="gcPlanImprovement" rows="3"></textarea>
+        </div>
+      </div>
+      <div class="modal-footer border-0 pt-0">
+        <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancel</button>
+        <button type="button" class="btn text-white fw-semibold" style="background:#1a2744;border:none" onclick="generateGeneralCorrective()">
+          <i class="fas fa-file-alt me-1"></i>Generate Form
+        </button>
+      </div>
+    </div>
+  </div>
+</div>
+
 
 </body>
 </html>
